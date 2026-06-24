@@ -149,6 +149,7 @@ private:
   void PipeBarrierCodegen(const CallNode *op);
 
   void GemmOpCodegen(const CallNode *op);
+  void CopyPACodegen(const CallNode *op);
 
   void PrintfOpCodegen(const CallNode *op, const std::string &op_name);
 
