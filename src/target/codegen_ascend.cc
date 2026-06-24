@@ -620,6 +620,9 @@ void CodeGenTileLangAscend::VisitExpr_(const CallNode *op, std::ostream &os) {
     GemmOpCodegen(op);
   } else if (op->op.same_as(tl::ascend_gemm_v0_fixp())) {
     GemmFixpOpCodegen(op);
+  } else if (op->op.same_as(tl::ascend_row_expand_div()) ||
+             op->op.same_as(tl::ascend_row_expand_sub())) {
+    RowExpandCodegen(op);
   } else if (op->op.same_as(tl::ascend_copy_pa())) {
     CopyPACodegen(op);
   } else if (op->op.same_as(tl::ascend_printf())) {
@@ -2149,9 +2152,10 @@ void CodeGenTileLangAscend::GemmOpCodegen(const CallNode *op) {
 }
 
 void CodeGenTileLangAscend::GemmFixpOpCodegen(const CallNode *op) {
-  // args: [0]=template name, [1]=A, [2]=B, [3]=C (L0C), [4]=dst (GM), [5]=init.
-  // Same shape as GemmOpCodegen plus the GM destination operand; the per-N-tile
-  // fixpipe lives inside the template.
+  // args: [0]=template name, [1]=A, [2]=B, [3]=C (L0C), [4]=dst (GM), [5]=init,
+  // [6]=k_actual. Same shape as GemmOpCodegen plus the GM destination operand
+  // and the runtime contraction length; the per-N-tile fixpipe lives inside the
+  // template.
   std::string op_name =
       "tl::ascend::" + Downcast<StringImm>(op->args[0])->value;
 
@@ -2176,6 +2180,14 @@ void CodeGenTileLangAscend::GemmFixpOpCodegen(const CallNode *op) {
                << d_name << "[" << d_offset
                << "], ascend_l0a, ascend_l0b, " << PrintExpr(op->args[5]) << ", "
                << PrintExpr(op->args[6]) << ");\n";
+}
+
+void CodeGenTileLangAscend::RowExpandCodegen(const CallNode *op) {
+  // args: [0]=template name (row_expand_div<T,M,N> / row_expand_sub<...>),
+  // [1]=dst, [2]=src0, [3]=src1 column, [4]=tmp. All UB buffers, no scalars.
+  std::string op_name =
+      "tl::ascend::" + Downcast<StringImm>(op->args[0])->value;
+  PrintOpCall(op, op_name, {1, 5}, {5, 5});
 }
 
 void CodeGenTileLangAscend::CopyPACodegen(const CallNode *op) {

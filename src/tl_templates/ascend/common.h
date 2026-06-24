@@ -1025,6 +1025,73 @@ CATLASS_DEVICE void brcb(const LocalTensor<T> &dst, const LocalTensor<T> &src0,
   AscendC::Brcb<T>(dst, src0, repeatTime, repeatParams);
 }
 
+// Row-broadcast elementwise: dst[i, j] = src0[i, j] OP src1_col[i], i.e. every
+// column of row i is combined with that row's single src1 value -- the faithful
+// equivalent of the Ascend C reference's RowDivs / RowMuls
+// (swa_block_vector.h: Brcb the [M,1] column into an [M, blk] tile, then
+// Div/Sub with src1BlkStride=0, src1RepStride=1). This avoids materialising an
+// [M, N] broadcast buffer (which overflowed the vector UB once the cube/vector
+// pipeline stopped the planner from reusing the softmax/output buffers). `tmp`
+// is an [M, 32/sizeof(T)] scratch for the Brcb. N must be a multiple of the
+// per-repeat element count (256/sizeof(T)).
+template <typename T, uint32_t M, uint32_t N>
+CATLASS_DEVICE void row_expand_div(const LocalTensor<T> &dst,
+                                   const LocalTensor<T> &src0,
+                                   const LocalTensor<T> &src1_col,
+                                   const LocalTensor<T> &tmp) {
+  constexpr uint32_t BLK = 32 / sizeof(T);   // elems per 32B block (f32: 8)
+  constexpr uint32_t MASK = 256 / sizeof(T); // elems per 256B repeat (f32: 64)
+  static_assert(N % MASK == 0,
+                "row_expand_div requires N % (256/sizeof(T)) == 0");
+  // Only the row-repeat (M-repeat) branch of the reference RowDivs is ported
+  // (no column-repeat else branch, no tail) -- valid when N/MASK <= M and rows
+  // are contiguous (row pitch == N). Both holds for the SWA caller (M=32, N<=512).
+  static_assert(N / MASK <= M,
+                "row_expand_div assumes N/MASK <= M (row-repeat branch only)");
+  AscendC::Brcb(tmp, src1_col, (M + BLK - 1) / BLK,
+                AscendC::BrcbRepeatParams(1, BLK));
+  AscendC::PipeBarrier<PIPE_V>();
+  AscendC::BinaryRepeatParams rp;
+  rp.src0BlkStride = 1;
+  rp.src1BlkStride = 0;
+  rp.dstBlkStride = 1;
+  rp.src0RepStride = N / BLK;
+  rp.src1RepStride = 1;
+  rp.dstRepStride = N / BLK;
+  for (uint32_t i = 0; i < N / MASK; i++) {
+    AscendC::Div(dst[i * MASK], src0[i * MASK], tmp, MASK, M, rp);
+  }
+}
+
+// Row-broadcast subtraction: dst[i, j] = src0[i, j] - src1_col[i]. Same scheme
+// as row_expand_div (Ascend C broadcasts the per-row max the same way inside its
+// softmax); replaces a materialised [M, N] max-broadcast buffer.
+template <typename T, uint32_t M, uint32_t N>
+CATLASS_DEVICE void row_expand_sub(const LocalTensor<T> &dst,
+                                   const LocalTensor<T> &src0,
+                                   const LocalTensor<T> &src1_col,
+                                   const LocalTensor<T> &tmp) {
+  constexpr uint32_t BLK = 32 / sizeof(T);
+  constexpr uint32_t MASK = 256 / sizeof(T);
+  static_assert(N % MASK == 0,
+                "row_expand_sub requires N % (256/sizeof(T)) == 0");
+  static_assert(N / MASK <= M,
+                "row_expand_sub assumes N/MASK <= M (row-repeat branch only)");
+  AscendC::Brcb(tmp, src1_col, (M + BLK - 1) / BLK,
+                AscendC::BrcbRepeatParams(1, BLK));
+  AscendC::PipeBarrier<PIPE_V>();
+  AscendC::BinaryRepeatParams rp;
+  rp.src0BlkStride = 1;
+  rp.src1BlkStride = 0;
+  rp.dstBlkStride = 1;
+  rp.src0RepStride = N / BLK;
+  rp.src1RepStride = 1;
+  rp.dstRepStride = N / BLK;
+  for (uint32_t i = 0; i < N / MASK; i++) {
+    AscendC::Sub(dst[i * MASK], src0[i * MASK], tmp, MASK, M, rp);
+  }
+}
+
 template <typename T1, typename T2, typename LayOutL1, typename LayoutGM,
           uint32_t M, uint32_t N, uint32_t K, uint32_t baseM, uint32_t baseN,
           uint32_t baseK, bool init, bool is_transpose_A = false,

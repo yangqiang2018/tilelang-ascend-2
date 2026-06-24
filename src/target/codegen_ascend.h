@@ -150,6 +150,7 @@ private:
 
   void GemmOpCodegen(const CallNode *op);
   void GemmFixpOpCodegen(const CallNode *op);
+  void RowExpandCodegen(const CallNode *op);
   void CopyPACodegen(const CallNode *op);
 
   void PrintfOpCodegen(const CallNode *op, const std::string &op_name);
