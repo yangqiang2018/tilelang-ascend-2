@@ -413,6 +413,59 @@ def gemm_v0(A, B, C, transpose_A=False, transpose_B=False, init=False):
     )
 
 
+def gemm_v0_fixp(A, B, C, dst, k_actual=None, transpose_A=False, transpose_B=False, init=False):
+    """GEMM with the per-N-tile fixpipe fused in (faithful to Ascend C ComputeMm2).
+
+    Same as :func:`gemm_v0` but, instead of leaving the whole ``[M, N]`` result
+    resident in the L0C accumulator ``C`` (which for a large N, e.g. the PV
+    matmul's N=headDim=512, would occupy the entire 128KB L0C), it tiles N and
+    fixpipes each ``[M, nTile]`` tile straight to the GM destination ``dst`` as
+    soon as that tile's K accumulation finishes. ``C`` is therefore only a
+    single ``[M, nTile]`` L0C slot (e.g. ``[64,128]`` = 32KB), reused per tile.
+
+    Args:
+        A, B: L1 input matrices (last two dims are the matrix dims).
+        C: the small L0C accumulator slot, shape ``[M, nTile]``.
+        dst: the GM destination, shape ``[M, N]`` (row major).
+        k_actual: runtime contraction length (<= K). Only the first ``k_actual``
+            rows of the K dim are loaded/contracted -- faithful to the reference
+            contracting over the actual window, and it keeps the PV from summing
+            unwritten pad rows of a paged tile (kv_l1[win:BI]), which would make
+            0 (masked P) * NaN (uninitialised V) -> NaN. Defaults to the full K.
+        transpose_A, transpose_B, init: as in :func:`gemm_v0`.
+    """
+    A = _legalize_arguments(A)
+    B = _legalize_arguments(B)
+    C = _legalize_arguments(C)
+    dst = _legalize_arguments(dst)
+
+    A_shape = _retrieve_shape(A)
+    dst_shape = _retrieve_shape(dst)
+
+    # M, N from the GM destination (the full output); K from A's contraction.
+    M, N = dst_shape[-2], dst_shape[-1]
+    K = A_shape[-2] if transpose_A else A_shape[-1]
+    if k_actual is None:
+        k_actual = K
+
+    Aptr = _retrieve_ptr(A, "r")
+    Bptr = _retrieve_ptr(B, "r")
+    Cptr = _retrieve_ptr(C, "w" if init is True else "rw")
+    Dptr = _retrieve_ptr(dst, "w")
+
+    return T.call_intrin(
+        "handle",
+        tir.op.Op.get("tl.ascend_gemm_v0_fixp"),
+        f"gemm_v0_fixp<{_dtype(A)}, {_dtype(C)}, layout::RowMajor, {M}, {N}, {K}, {str(transpose_A).lower()}, {str(transpose_B).lower()}>",
+        Aptr,
+        Bptr,
+        Cptr,
+        Dptr,
+        init,
+        k_actual,
+    )
+
+
 def copy_pa(
     dst,
     kv,

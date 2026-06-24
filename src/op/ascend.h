@@ -186,6 +186,8 @@ TVM_DLL const Op &ascend_sync_all();
 
 TVM_DLL const Op &ascend_gemm_v0();
 
+TVM_DLL const Op &ascend_gemm_v0_fixp();
+
 TVM_DLL const Op &ascend_gemm_v1();
 
 TVM_DLL const Op &ascend_copy_pa();
