@@ -618,6 +618,9 @@ void CodeGenTileLangAscend::VisitExpr_(const CallNode *op, std::ostream &os) {
     PrintOpCall(op, "AscendC::SyncAll<false>", {0, 0}, {0, 0});
   } else if (op->op.same_as(tl::ascend_gemm_v0())) {
     GemmOpCodegen(op);
+  } else if (op->op.same_as(tl::ascend_row_expand_div()) ||
+             op->op.same_as(tl::ascend_row_expand_sub())) {
+    RowExpandCodegen(op);
   } else if (op->op.same_as(tl::ascend_copy_pa())) {
     CopyPACodegen(op);
   } else if (op->op.same_as(tl::ascend_printf())) {
@@ -2144,6 +2147,14 @@ void CodeGenTileLangAscend::GemmOpCodegen(const CallNode *op) {
                << "[" << b_offset << "], " << c_name << "[" << c_offset
                << "], ascend_l0a, ascend_l0b, " << PrintExpr(op->args[4])
                << ");\n";
+}
+
+void CodeGenTileLangAscend::RowExpandCodegen(const CallNode *op) {
+  // args: [0]=template name (row_expand_div<T,M,N> / row_expand_sub<...>),
+  // [1]=dst, [2]=src0, [3]=src1 column, [4]=tmp. All UB buffers, no scalars.
+  std::string op_name =
+      "tl::ascend::" + Downcast<StringImm>(op->args[0])->value;
+  PrintOpCall(op, op_name, {1, 5}, {5, 5});
 }
 
 void CodeGenTileLangAscend::CopyPACodegen(const CallNode *op) {
