@@ -737,6 +737,113 @@ gemm_v0(LocalTensor<T1> const &A, LocalTensor<T1> const &B,
   WaitFlag<HardEvent::M_FIX>(L0AB_EVENT);
 }
 
+// gemm_v0 with the per-N-tile fixpipe fused in (faithful to the Ascend C
+// reference's ComputeMm2: each [M, nTile] tile is Fixpipe'd to GM as soon as
+// its K accumulation finishes, so L0C only ever holds one [M, nTile] tile).
+// Unlike gemm_v0 -- which keeps the whole [M, N] result resident in L0C until
+// the caller copies it out (N=512 PV => 128KB = the entire L0C) -- this writes
+// each N-tile straight to the GM destination, so the L0C accumulator C is a
+// single [M, nTile] slot (e.g. [64,128]=32KB). Same N/K tiling and L0A/L0B
+// ping-pong as gemm_v0; the only addition is the per-tile copy_l0c_to_gm and
+// the M_FIX/FIX_M handshake that lets the single L0C slot be reused per tile.
+// (No PV K-splitting needed here: K=block_I<=128 fits one kL0 tile.)
+template <typename T1, typename T2, typename LayoutGM, uint32_t M, uint32_t N,
+          uint32_t K, bool transpose_A = false, bool transpose_B = false>
+CATLASS_DEVICE void
+gemm_v0_fixp(LocalTensor<T1> const &A, LocalTensor<T1> const &B,
+             LocalTensor<T2> const &C, // single [M, nTile] L0C slot
+             GlobalTensor<T2> dst,     // GM destination [M, N], row major
+             AscendC::TBuf<AscendC::TPosition::A2> &l0a_,
+             AscendC::TBuf<AscendC::TPosition::B2> &l0b_, bool clear,
+             uint32_t k_actual) {
+  auto l0a = l0a_.Get<T1>();
+  auto l0b = l0b_.Get<T1>();
+  constexpr uint32_t kL0Size = 128;
+  // k_actual: the runtime contraction length (<= K). Only the first k_actual
+  // rows of the K dim are loaded into L0 and contracted -- faithful to the
+  // Ascend C reference contracting over the actual window (kSize=actualWindow),
+  // not the padded tile. This is what keeps the PV from summing the unwritten
+  // pad rows of a paged KV tile (kv_l1[win:BI]): those rows are uninitialised
+  // L1 on first use, and summing 0 (masked P) * NaN (garbage V) -> NaN. Single
+  // K tile only (K <= kL0Size); every gemm_v0_fixp caller satisfies it.
+  static_assert(K <= kL0Size,
+                "gemm_v0_fixp assumes a single K tile (K <= 128) for k_actual");
+  uint32_t kL0split = (K + kL0Size - 1) / kL0Size;
+  bool initflag = false;
+
+  // N tiling: identical to gemm_v0 (B tile (kL0Size x nTile) must fit the 32KB
+  // L0B ping-pong slot). C is a single [M, nTile] slot reused per N-tile.
+  constexpr uint32_t nMaxByL0B = (32u * 1024u) / (kL0Size * sizeof(T1));
+  constexpr uint32_t nTile = (transpose_B || N <= nMaxByL0B) ? N : nMaxByL0B;
+  static_assert(transpose_B || (N % nTile == 0),
+                "gemm_v0_fixp N-tiling requires N divisible by the N tile size");
+  constexpr uint32_t nL0split = N / nTile;
+  constexpr uint32_t kRound = ((K + 15u) / 16u) * 16u;
+
+  SetFlag<HardEvent::MTE2_MTE1>(L0AB_EVENT);
+  WaitFlag<HardEvent::MTE2_MTE1>(L0AB_EVENT);
+  // drain any prior fixpipe before the first mma writes the single L0C slot.
+  SetFlag<HardEvent::FIX_M>(L0AB_EVENT);
+  WaitFlag<HardEvent::FIX_M>(L0AB_EVENT);
+
+  SetFlag<HardEvent::M_MTE1>(L0AB_EVENT);
+  SetFlag<HardEvent::M_MTE1>(L0AB_EVENT + 1);
+
+  uint32_t tileIdx = 0;
+  for (uint32_t nL0Idx = 0; nL0Idx < nL0split; nL0Idx++) {
+    uint32_t bNOffset = transpose_B ? 0u : (nL0Idx * nTile * kRound);
+
+    for (uint32_t kL0Idx = 0; kL0Idx < kL0split; kL0Idx++) {
+      initflag = (clear && (kL0Idx == 0));
+      // single K tile (K<=128): contract only the actual window length.
+      uint32_t kSize = k_actual;
+      uint32_t pp = (tileIdx & 1);
+
+      uint32_t l0a_base = pp * (M * kL0Size);
+      uint32_t l0b_base = pp * (nTile * kL0Size);
+
+      WaitFlag<HardEvent::M_MTE1>(L0AB_EVENT + pp);
+      if constexpr (!transpose_A) {
+        tl::ascend::copy_l1_to_l0a<T1, M, K>(l0a[l0a_base],
+                                             A[kL0Idx * M * kL0Size], M, kSize);
+      } else {
+        tl::ascend::copy_l1_to_l0a<T1, K, M, true>(
+            l0a[l0a_base], A[kL0Idx * 16 * kL0Size], M, kSize);
+      }
+      if constexpr (!transpose_B) {
+        tl::ascend::copy_l1_to_l0b<T1, K, N>(
+            l0b[l0b_base], B[bNOffset + kL0Idx * 16 * kL0Size], kSize, nTile);
+      } else {
+        tl::ascend::copy_l1_to_l0b<T1, N, K, true>(
+            l0b[l0b_base], B[kL0Idx * N * kL0Size], kSize, N);
+      }
+      SetFlag<HardEvent::MTE1_M>(L0AB_EVENT + pp);
+      WaitFlag<HardEvent::MTE1_M>(L0AB_EVENT + pp);
+      PipeBarrier<PIPE_M>();
+      // accumulate this N-tile's K into the single L0C slot C[0].
+      tl::ascend::mma<T1, T2, M, nTile>(l0a[l0a_base], l0b[l0b_base], C[0],
+                                        initflag, kSize);
+      SetFlag<HardEvent::M_MTE1>(L0AB_EVENT + pp);
+      tileIdx++;
+    }
+
+    // N-tile done: fixpipe C[0] -> dst column band [.., nL0Idx*nTile ..].
+    SetFlag<HardEvent::M_FIX>(L0AB_EVENT);
+    WaitFlag<HardEvent::M_FIX>(L0AB_EVENT);
+    tl::ascend::copy_l0c_to_gm<T2, T2, LayoutGM, M, nTile>(dst[nL0Idx * nTile],
+                                                           C[0], N);
+    // reuse C[0] for the next N-tile only after this fixpipe has drained.
+    SetFlag<HardEvent::FIX_M>(L0AB_EVENT);
+    WaitFlag<HardEvent::FIX_M>(L0AB_EVENT);
+  }
+
+  WaitFlag<HardEvent::M_MTE1>(L0AB_EVENT);
+  WaitFlag<HardEvent::M_MTE1>(L0AB_EVENT + 1);
+
+  SetFlag<HardEvent::MTE1_MTE2>(L0AB_EVENT);
+  WaitFlag<HardEvent::MTE1_MTE2>(L0AB_EVENT);
+}
+
 // 2-way merge sort
 template <typename T>
 CATLASS_DEVICE void
