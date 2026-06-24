@@ -413,6 +413,45 @@ void CodeGenTileLangAscend::VisitExpr_(const FloorModNode *op,
   os << ")";
 }
 
+// Emit INTEGER max/min as a ternary instead of the bare `max(a, b)` / `min(a,
+// b)` call that CodeGenC produces. In the Ascend (bisheng/CANN) C++ environment
+// those unqualified names resolve ambiguously for mixed integer widths (e.g.
+// `max(int64_t, int)` from an int64 loop var and an int literal). A ternary
+// needs no overload resolution, so it compiles unambiguously. Scope this to
+// integer/uint dtypes so float max/min keep CodeGenC's default (NaN semantics
+// unchanged) -- this makes the change strictly additive for non-integer ops.
+void CodeGenTileLangAscend::VisitExpr_(const MaxNode *op, std::ostream &os) {
+  if (op->dtype.is_int() || op->dtype.is_uint()) {
+    os << "(";
+    PrintExpr(op->a, os);
+    os << " > ";
+    PrintExpr(op->b, os);
+    os << " ? ";
+    PrintExpr(op->a, os);
+    os << " : ";
+    PrintExpr(op->b, os);
+    os << ")";
+  } else {
+    CodeGenC::VisitExpr_(op, os);
+  }
+}
+
+void CodeGenTileLangAscend::VisitExpr_(const MinNode *op, std::ostream &os) {
+  if (op->dtype.is_int() || op->dtype.is_uint()) {
+    os << "(";
+    PrintExpr(op->a, os);
+    os << " < ";
+    PrintExpr(op->b, os);
+    os << " ? ";
+    PrintExpr(op->a, os);
+    os << " : ";
+    PrintExpr(op->b, os);
+    os << ")";
+  } else {
+    CodeGenC::VisitExpr_(op, os);
+  }
+}
+
 void CodeGenTileLangAscend::VisitExpr_(const BufferLoadNode *op,
                                        std::ostream &os) {
   auto var_name = var_idmap_[op->buffer->data.get()];
