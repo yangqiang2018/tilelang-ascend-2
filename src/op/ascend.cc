@@ -1190,7 +1190,7 @@ TIR_DEFINE_TL_BUILTIN(ascend_gemm_v0)
 // [0]=template name, [1]=A, [2]=B, [3]=C (L0C slot), [4]=dst (GM), [5]=init,
 // [6]=k_actual (runtime contraction length <= K).
 TIR_DEFINE_TL_BUILTIN(ascend_gemm_v0_fixp)
-    .set_num_inputs(7)
+    .set_num_inputs(9)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
 
