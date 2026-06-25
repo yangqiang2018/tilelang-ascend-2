@@ -338,7 +338,7 @@ def shmem_ub_get_nbi(dst: Buffer, src: Buffer, nelems: PrimExpr, newPe: PrimExpr
     )
 
 
-def gemm_v0(A, B, C, transpose_A=False, transpose_B=False, init=False):
+def gemm_v0(A, B, C, transpose_A=False, transpose_B=False, init=False, n_actual=None):
     """
     Performs a block-level General Matrix Multiplication (GEMM).
 
@@ -401,6 +401,11 @@ def gemm_v0(A, B, C, transpose_A=False, transpose_B=False, init=False):
     Bptr = _retrieve_ptr(B, "r")
     Cptr = _retrieve_ptr(C, "w" if init is True else "rw")
 
+    # n_actual: runtime output-column count (<= N), honoured on the transpose_B
+    # path (e.g. QK over the actual window). Defaults to the full N.
+    if n_actual is None:
+        n_actual = N
+
     # assert _dtype(A) == _dtype(B), f"gemm A and B dtype mismatch: {_dtype(A)} vs {_dtype(B)}"
     return T.call_intrin(
         "handle",
@@ -410,6 +415,7 @@ def gemm_v0(A, B, C, transpose_A=False, transpose_B=False, init=False):
         Bptr,
         Cptr,
         init,
+        n_actual,
     )
 
 

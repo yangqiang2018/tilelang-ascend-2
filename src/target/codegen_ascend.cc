@@ -2149,8 +2149,8 @@ void CodeGenTileLangAscend::GemmOpCodegen(const CallNode *op) {
 
   this->stream << op_name << "(" << a_name << "[" << a_offset << "], " << b_name
                << "[" << b_offset << "], " << c_name << "[" << c_offset
-               << "], ascend_l0a, ascend_l0b, " << PrintExpr(op->args[4])
-               << ");\n";
+               << "], ascend_l0a, ascend_l0b, " << PrintExpr(op->args[4]) << ", "
+               << PrintExpr(op->args[5]) << ");\n";
 }
 
 void CodeGenTileLangAscend::GemmFixpOpCodegen(const CallNode *op) {
