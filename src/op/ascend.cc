@@ -1179,8 +1179,10 @@ TIR_DEFINE_TL_BUILTIN(ascend_sync_all)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
 
+// [0]=template name, [1]=A, [2]=B, [3]=C, [4]=init, [5]=n_actual (runtime
+// output-column count <= N; defaults to N at the binding when not given).
 TIR_DEFINE_TL_BUILTIN(ascend_gemm_v0)
-    .set_num_inputs(5)
+    .set_num_inputs(6)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
 
