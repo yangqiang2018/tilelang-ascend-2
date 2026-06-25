@@ -194,7 +194,11 @@ CATLASS_DEVICE void mma(LocalTensor<T1> const A, LocalTensor<T1> const B,
   mmadParams.n = n_actual;
   mmadParams.k = K;
   mmadParams.cmatrixInitVal = init;
-  // mmadParams.unitFlag = unitFlag;
+  // unitFlag drives the hardware mma->fixpipe pipeline (0b10 accumulate / 0b11
+  // flush), faithful to the Ascend C reference's cL0TensorPingPong overlap
+  // (block_cube.h ComputeMm2:910). Defaults to 0 (off) so every pre-existing
+  // caller is byte-for-byte unchanged; only gemm_v0_fixp opts into 0b10/0b11.
+  mmadParams.unitFlag = unitFlag;
 
   Mmad(C, A, B, mmadParams);
 
@@ -210,7 +214,7 @@ template <typename T1, typename T2, typename LayoutGM, uint32_t srcM,
 CATLASS_DEVICE void
 copy_l0c_to_gm(GlobalTensor<T2> dstTensor, LocalTensor<T1> srcTensor,
                uint32_t realDstN = 1, uint32_t realTailM = 0,
-               uint32_t realTailN = 0) {
+               uint32_t realTailN = 0, uint8_t unitFlag = 0) {
   uint32_t tailM = realTailM == 0 ? srcM : realTailM;
   uint32_t tailN = realTailN == 0 ? srcN : realTailN;
   auto layoutInL0C = tla::MakeLayoutL0C(srcM, srcN);
@@ -227,7 +231,9 @@ copy_l0c_to_gm(GlobalTensor<T2> dstTensor, LocalTensor<T1> srcTensor,
   CopyL0CToGmTla<ArchTag, decltype(src), decltype(dst),
                  ScaleGranularity::NO_QUANT, enRelu>
       tileCopier;
-  tileCopier(dst, src, 0);
+  // unitFlag (default 0) pairs with the Mmad unitFlag for the cL0 ping-pong
+  // fixpipe||mma overlap; CopyL0CToGmTla already plumbs it into FixpipeParams.
+  tileCopier(dst, src, unitFlag);
 }
 
 template <uint32_t M, uint32_t N, uint32_t K, uint32_t block_M,
@@ -760,19 +766,20 @@ gemm_v0(LocalTensor<T1> const &A, LocalTensor<T1> const &B,
 
 // gemm_v0 with the per-N-tile fixpipe fused in (faithful to the Ascend C
 // reference's ComputeMm2: each [M, nTile] tile is Fixpipe'd to GM as soon as
-// its K accumulation finishes, so L0C only ever holds one [M, nTile] tile).
+// its K accumulation finishes, so L0C only holds the live ping-pong tiles).
 // Unlike gemm_v0 -- which keeps the whole [M, N] result resident in L0C until
 // the caller copies it out (N=512 PV => 128KB = the entire L0C) -- this writes
-// each N-tile straight to the GM destination, so the L0C accumulator C is a
-// single [M, nTile] slot (e.g. [64,128]=32KB). Same N/K tiling and L0A/L0B
-// ping-pong as gemm_v0; the only addition is the per-tile copy_l0c_to_gm and
-// the M_FIX/FIX_M handshake that lets the single L0C slot be reused per tile.
-// (No PV K-splitting needed here: K=block_I<=128 fits one kL0 tile.)
+// each N-tile straight to the GM destination. C is a 2-slot [2, M, nTile] L0C
+// ping-pong (e.g. [2,64,128]=64KB): consecutive N-tiles alternate slots so the
+// fixpipe(tile i) overlaps the mma(tile i+1), carried by the hardware unitFlag
+// (Mmad 0b11 + Fixpipe 0b11) -- faithful to the reference cL0TensorPingPong,
+// NOT a software M_FIX/FIX_M handshake. Same N/K tiling and L0A/L0B ping-pong
+// as gemm_v0. (No PV K-splitting needed here: K=block_I<=128 fits one kL0 tile.)
 template <typename T1, typename T2, typename LayoutGM, uint32_t M, uint32_t N,
           uint32_t K, bool transpose_A = false, bool transpose_B = false>
 CATLASS_DEVICE void
 gemm_v0_fixp(LocalTensor<T1> const &A, LocalTensor<T1> const &B,
-             LocalTensor<T2> const &C, // single [M, nTile] L0C slot
+             LocalTensor<T2> const &C, // 2-slot [2, M, nTile] L0C ping-pong
              GlobalTensor<T2> dst,     // GM destination [M, N], row major
              AscendC::TBuf<AscendC::TPosition::A2> &l0a_,
              AscendC::TBuf<AscendC::TPosition::B2> &l0b_, bool clear,
@@ -803,21 +810,28 @@ gemm_v0_fixp(LocalTensor<T1> const &A, LocalTensor<T1> const &B,
 
   SetFlag<HardEvent::MTE2_MTE1>(L0AB_EVENT);
   WaitFlag<HardEvent::MTE2_MTE1>(L0AB_EVENT);
-  // drain any prior fixpipe before the first mma writes the single L0C slot.
-  SetFlag<HardEvent::FIX_M>(L0AB_EVENT);
-  WaitFlag<HardEvent::FIX_M>(L0AB_EVENT);
 
   SetFlag<HardEvent::M_MTE1>(L0AB_EVENT);
   SetFlag<HardEvent::M_MTE1>(L0AB_EVENT + 1);
 
+  // cL0 ping-pong over N-tiles, faithful to the Ascend C reference ComputeMm2
+  // (block_cube.h:833-940): two L0C slots picked by cL0BufIter%2; the
+  // fixpipe(N-tile i) || mma(N-tile i+1) overlap is carried by the hardware
+  // unitFlag (Mmad 0b11 on the last K + Fixpipe 0b11), NOT by software
+  // M_FIX/FIX_M flags. The caller allocates C as a [2, M, nTile] L0C tensor.
+  uint32_t cL0BufIter = 0;
   uint32_t tileIdx = 0;
   for (uint32_t nL0Idx = 0; nL0Idx < nL0split; nL0Idx++) {
     uint32_t bNOffset = transpose_B ? 0u : (nL0Idx * nTile * kRound);
+    uint32_t c_base = (cL0BufIter & 1) * (M * nTile); // 2-slot L0C select
 
     for (uint32_t kL0Idx = 0; kL0Idx < kL0split; kL0Idx++) {
       initflag = (clear && (kL0Idx == 0));
       // single K tile (K<=128): contract only the actual window length.
       uint32_t kSize = k_actual;
+      // last K sub-tile flushes (0b11); earlier ones accumulate (0b10) --
+      // faithful to ComputeMm2:910. (K<=128 here => single tile => always 0b11.)
+      uint8_t unitFlag = (kL0Idx == kL0split - 1) ? 0b11 : 0b10;
       uint32_t pp = (tileIdx & 1);
 
       uint32_t l0a_base = pp * (M * kL0Size);
@@ -840,22 +854,27 @@ gemm_v0_fixp(LocalTensor<T1> const &A, LocalTensor<T1> const &B,
       }
       SetFlag<HardEvent::MTE1_M>(L0AB_EVENT + pp);
       WaitFlag<HardEvent::MTE1_M>(L0AB_EVENT + pp);
-      PipeBarrier<PIPE_M>();
-      // accumulate this N-tile's K into the single L0C slot C[0].
-      tl::ascend::mma<T1, T2, M, nTile>(l0a[l0a_base], l0b[l0b_base], C[0],
-                                        initflag, kSize);
+      // accumulate this N-tile's K into the selected L0C slot; unitFlag drives
+      // the mma->fixpipe pipeline so the next N-tile (other slot) overlaps.
+      // Faithful to ComputeMm2:902-914 -- WaitFlag<MTE1_M> then Mmad directly
+      // (NO PipeBarrier<PIPE_M> before the mma; that would drain the M pipe and
+      // defeat the cL0 ping-pong), with the tiny-tile hazard barrier only AFTER
+      // and only when (M/16)*(nTile/16) < 10 (a no-op for PV's 4*8=32).
+      tl::ascend::mma<T1, T2, M, nTile>(l0a[l0a_base], l0b[l0b_base], C[c_base],
+                                        initflag, kSize, nTile, unitFlag);
+      if constexpr ((M / 16u) * (nTile / 16u) < 10u) {
+        PipeBarrier<PIPE_M>();
+      }
       SetFlag<HardEvent::M_MTE1>(L0AB_EVENT + pp);
       tileIdx++;
     }
 
-    // N-tile done: fixpipe C[0] -> dst column band [.., nL0Idx*nTile ..].
-    SetFlag<HardEvent::M_FIX>(L0AB_EVENT);
-    WaitFlag<HardEvent::M_FIX>(L0AB_EVENT);
-    tl::ascend::copy_l0c_to_gm<T2, T2, LayoutGM, M, nTile>(dst[nL0Idx * nTile],
-                                                           C[0], N);
-    // reuse C[0] for the next N-tile only after this fixpipe has drained.
-    SetFlag<HardEvent::FIX_M>(L0AB_EVENT);
-    WaitFlag<HardEvent::FIX_M>(L0AB_EVENT);
+    // N-tile done: fixpipe C[c_base] -> dst column band. unitFlag 0b11 pairs
+    // with the Mmad unitFlag (hardware mma->fixpipe pipeline); no software
+    // M_FIX/FIX_M flag -- the next N-tile uses the other L0C slot and overlaps.
+    tl::ascend::copy_l0c_to_gm<T2, T2, LayoutGM, M, nTile>(
+        dst[nL0Idx * nTile], C[c_base], N, 0, 0, 0b11);
+    cL0BufIter++;
   }
 
   WaitFlag<HardEvent::M_MTE1>(L0AB_EVENT);
