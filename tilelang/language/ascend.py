@@ -426,12 +426,14 @@ def gemm_v0_fixp(A, B, C, dst, k_actual=None, transpose_A=False, transpose_B=Fal
     resident in the L0C accumulator ``C`` (which for a large N, e.g. the PV
     matmul's N=headDim=512, would occupy the entire 128KB L0C), it tiles N and
     fixpipes each ``[M, nTile]`` tile straight to the GM destination ``dst`` as
-    soon as that tile's K accumulation finishes. ``C`` is therefore only a
-    single ``[M, nTile]`` L0C slot (e.g. ``[64,128]`` = 32KB), reused per tile.
+    soon as that tile's K accumulation finishes. ``C`` is a 2-slot
+    ``[2, M, nTile]`` L0C ping-pong (e.g. ``[2,64,128]`` = 64KB): consecutive
+    N-tiles alternate slots so fixpipe(tile i) overlaps mma(tile i+1) via the
+    hardware unitFlag, faithful to the reference cL0TensorPingPong.
 
     Args:
         A, B: L1 input matrices (last two dims are the matrix dims).
-        C: the small L0C accumulator slot, shape ``[M, nTile]``.
+        C: the 2-slot L0C ping-pong accumulator, shape ``[2, M, nTile]``.
         dst: the GM destination, shape ``[M, N]`` (row major).
         k_actual: runtime contraction length (<= K). Only the first ``k_actual``
             rows of the K dim are loaded/contracted -- faithful to the reference
