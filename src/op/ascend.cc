@@ -1138,6 +1138,17 @@ TIR_DEFINE_TL_BUILTIN(ascend_row_expand_sub)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
 
+// Faithful Ascend C SoftmaxFlashV2 (variable-N online softmax; compacts the
+// window to a contiguous tile so the library runs in its win_align range).
+// Inputs: [0]=template name, [1]=dst(P), [2]=sum, [3]=max, [4]=expmax,
+// [5]=src, [6]=in_sum, [7]=in_max, [8]=tmp (uint8 scratch), [9]=compact (UB
+// compaction buffer), [10]=col_count (runtime win_align), [11]=actual_col
+// (runtime winm).
+TIR_DEFINE_TL_BUILTIN(ascend_softmax_flash_v2)
+    .set_num_inputs(12)
+    .set_attr<TCallEffectKind>("TCallEffectKind",
+                               Integer(CallEffectKind::kOpaque));
+
 TIR_DEFINE_TL_BUILTIN(ascend_wait_cross_flag)
     .set_num_inputs(2)
     .set_attr<TCallEffectKind>("TCallEffectKind",

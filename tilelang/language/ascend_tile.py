@@ -2197,6 +2197,59 @@ def row_expand_sub(dst, src0, src1, tmp):
     return _row_expand_binary("row_expand_sub", "tl.ascend_row_expand_sub", dst, src0, src1, tmp)
 
 
+def softmax_flash_v2(dst, out_sum, out_max, expmax, src, in_sum, in_max, tmp, compact, col_count, actual_col):
+    """Faithful Ascend C SoftmaxFlashV2 (swa_block_vector.h SoftmaxFlashV2Compute):
+    the variable-N online softmax over the SWA window.
+
+    Ascend C runs the library on a win_align-strided score tile. Our ``src``/``dst``
+    are a fixed [M, N]-strided UB tile whose first ``col_count`` (= 16-aligned
+    window win_align) columns hold the score and whose [col_count, N) tail is
+    uninitialised. The primitive compacts ``src[:, 0:col_count]`` into the
+    contiguous [M, col_count] ``compact`` buffer, runs SoftmaxFlashV2 there (srcK =
+    col_count, the library's designed range), then scatters the result back to
+    ``dst[:, 0:col_count]`` -- the uninitialised tail is never read; the >=16
+    alignment tail [actual_col, col_count) is exp'd but excluded by the reduce
+    (oriSrcK = actual_col), exactly as in Ascend C.
+
+    ``dst`` (== ``src``, in place via isReuseSource) receives P = exp(score -
+    newMax); ``out_sum``/``out_max`` are the running sum/max columns [M, 1], seeded
+    by ``in_sum`` (1.0) / ``in_max`` (the per-row sink); ``expmax`` is the flash
+    rescale factor [M, 1] (unused for a single block). ``tmp`` is a uint8 shared
+    scratch; ``compact`` is the [M, N]-capacity contiguous score buffer. M and N
+    come from ``dst``'s last two dims (N = buffer row stride). ``col_count``
+    (= win_align) and ``actual_col`` (= winm) are runtime scalars (<= N); col_count
+    and N must be multiples of 32/sizeof(dtype)."""
+    if isinstance(dst, BufferRegion):
+        dst_ptr, dst_shape = _handle_buffer_region_2d(dst, "w")
+    else:
+        dst_ptr = dst.access_ptr("w")
+        dst_shape = list(dst.shape[-2:])
+
+    def _ptr(x, mask):
+        if isinstance(x, BufferRegion):
+            ptr, _ = _handle_buffer_region(x, mask)
+            return ptr
+        return x.access_ptr(mask)
+
+    M, N = dst_shape[-2], dst_shape[-1]
+    return tir.call_intrin(
+        "handle",
+        tir.op.Op.get("tl.ascend_softmax_flash_v2"),
+        f"softmax_flash_v2<{_dtype(dst)}, {M}, {N}>",
+        dst_ptr,
+        _ptr(out_sum, "w"),
+        _ptr(out_max, "w"),
+        _ptr(expmax, "w"),
+        _ptr(src, "r"),
+        _ptr(in_sum, "r"),
+        _ptr(in_max, "r"),
+        _ptr(tmp, "w"),
+        _ptr(compact, "w"),
+        col_count,
+        actual_col,
+    )
+
+
 def sub_experiment(dst: Buffer, src0: Buffer, src1: Buffer, count: PrimExpr):
     """Performs element-wise subtraction(with count function): dst = src0 - src1.
 

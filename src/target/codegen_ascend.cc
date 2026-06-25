@@ -623,6 +623,8 @@ void CodeGenTileLangAscend::VisitExpr_(const CallNode *op, std::ostream &os) {
   } else if (op->op.same_as(tl::ascend_row_expand_div()) ||
              op->op.same_as(tl::ascend_row_expand_sub())) {
     RowExpandCodegen(op);
+  } else if (op->op.same_as(tl::ascend_softmax_flash_v2())) {
+    SoftmaxFlashV2OpCodegen(op);
   } else if (op->op.same_as(tl::ascend_copy_pa())) {
     CopyPACodegen(op);
   } else if (op->op.same_as(tl::ascend_printf())) {
@@ -2188,6 +2190,17 @@ void CodeGenTileLangAscend::RowExpandCodegen(const CallNode *op) {
   std::string op_name =
       "tl::ascend::" + Downcast<StringImm>(op->args[0])->value;
   PrintOpCall(op, op_name, {1, 5}, {5, 5});
+}
+
+void CodeGenTileLangAscend::SoftmaxFlashV2OpCodegen(const CallNode *op) {
+  // args: [0]=template name (softmax_flash_v2<T,M,N>), [1..9]=UB buffers
+  // (dst, sum, max, expmax, src, in_sum, in_max, tmp, compact), [10]=col_count
+  // and [11]=actual_col (runtime scalars = win_align / winm). The compact /
+  // SoftMaxShapeInfo / tiling / SoftmaxFlashV2 / scatter all live inside the
+  // common.h template, so codegen emits a single call.
+  std::string op_name =
+      "tl::ascend::" + Downcast<StringImm>(op->args[0])->value;
+  PrintOpCall(op, op_name, {1, 10}, {10, 12});
 }
 
 void CodeGenTileLangAscend::CopyPACodegen(const CallNode *op) {
