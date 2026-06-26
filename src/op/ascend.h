@@ -35,6 +35,15 @@ private:
   bool enRelu;
   bool transposeL1;
   PrimExpr padValue;
+  // L0C->GM fixpipe unitFlag (default 0). Parsed from optional args[5]; threaded
+  // into the copy_l0c_to_gm call so a kernel-driven fixpipe can fuse with the
+  // preceding mma's unitFlag (the cL0 ping-pong mma->fixpipe pipeline).
+  PrimExpr unitFlag;
+  // L1->L0 runtime contraction length (default 0 = use the dst L0 buffer dim).
+  // Parsed from optional args[6]; overrides the K extent of the L0 fractal
+  // (copy_l1_to_l0a dstN / copy_l1_to_l0b dstM) so it matches the mma's k_actual
+  // -- otherwise a full-width L0 load + a k=winm mma read mismatched fractals.
+  PrimExpr realK;
 };
 
 class AscendAtomicAdd : public Operator {

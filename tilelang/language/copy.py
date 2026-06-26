@@ -199,6 +199,8 @@ def npu_copy_v2(
     enable_relu: bool = False,
     transpose: bool | None = False,  # for copy_l1_to_l0 param: tranpose l1
     pad_value: float | int | tir.PrimExpr | None = None,
+    unit_flag: int | None = None,
+    real_k: int | tir.PrimExpr | None = None,
 ):
     """Copy data between memory regions.
 
@@ -210,6 +212,21 @@ def npu_copy_v2(
         pad_value (Optional[Union[float, int, tir.PrimExpr]]): Value to fill in UB unused area.
             Supports float, int, tir.FloatImm, tir.IntImm, tir.PrimExpr (e.g., -T.infinity(dtype)).
             Defaults to 0.
+        unit_flag (Optional[int]): L0C->GM fixpipe unitFlag (0b10 accumulate / 0b11 flush).
+            Defaults to ``None`` -> the C++ ``copy_l0c_to_gm`` template's default 0
+            (a standalone fixpipe, byte-for-byte unchanged for every existing copy).
+            Set 0b11 to fuse this fixpipe with a preceding ``T.mma(unit_flag=0b11)``
+            via the hardware mma->fixpipe pipeline (the row stride is already taken
+            from the GM buffer's last dim by ``compute_strideN``). This is the
+            "融合-带-行间距 fixpipe" primitive for the ring-aware decomposition (Layer ③).
+        real_k (Optional[int | PrimExpr]): L1->L0 runtime contraction length. Defaults
+            to ``None`` -> the L0 fractal's K extent comes from the dst L0 buffer dim
+            (byte-identical for every existing copy). Set it (e.g. ``real_k=winm``) so
+            a FULL-width L0 buffer is loaded as a ``[M, real_k]`` (matrix_a) /
+            ``[real_k, N]`` (matrix_b) fractal that matches a following
+            ``T.mma(k_actual=real_k)`` -- otherwise the full-width load + a shorter
+            mma K read mismatched fractals (wrong M-block addressing). The L1->L0
+            counterpart of the mma's ``k_actual``.
 
     Raises:
         TypeError: If copy extents cannot be deduced from arguments
@@ -282,4 +299,12 @@ def npu_copy_v2(
     else:
         pad_value_expr = tir.IntImm("int32", int(pad_value))
 
-    return tir.call_intrin("handle", tir.op.Op.get("tl.ascend_copy"), src, dst, enable_relu, transpose, pad_value_expr)
+    copy_args = [src, dst, enable_relu, transpose, pad_value_expr]
+    # unit_flag at position [5], real_k at [6]. When real_k is given but unit_flag
+    # is not, emit unit_flag=0 so real_k keeps its fixed position. Both default
+    # absent -> every existing copy is byte-identical.
+    if unit_flag is not None or real_k is not None:
+        copy_args.append(tir.IntImm("int32", int(unit_flag) if unit_flag is not None else 0))
+        if real_k is not None:
+            copy_args.append(real_k if isinstance(real_k, tir.PrimExpr) else tir.IntImm("int32", int(real_k)))
+    return tir.call_intrin("handle", tir.op.Op.get("tl.ascend_copy"), *copy_args)

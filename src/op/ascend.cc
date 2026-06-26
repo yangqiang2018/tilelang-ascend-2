@@ -57,6 +57,20 @@ AscendCopy::AscendCopy(Array<PrimExpr> args, BufferMap vmap) : args_(args) {
   } else {
     padValue = Integer(0);
   }
+  // optional L0C->GM fixpipe unitFlag (default 0 = standalone fixpipe, the
+  // byte-identical behaviour for every copy that doesn't request fusion).
+  if (args.size() >= 6) {
+    unitFlag = args[5];
+  } else {
+    unitFlag = Integer(0);
+  }
+  // optional L1->L0 runtime K (default 0 = use dst L0 buffer dim, byte-identical
+  // for every existing l1->l0 copy).
+  if (args.size() >= 7) {
+    realK = args[6];
+  } else {
+    realK = Integer(0);
+  }
   std::tie(this->src, this->dst) = std::tie(bf[0], bf[1]);
   std::tie(this->src_range, this->dst_range) = std::tie(rgs[0], rgs[1]);
   std::tie(this->src_extents, this->dst_extents) = std::tie(ets[0], ets[1]);
@@ -427,14 +441,32 @@ Stmt AscendCopy::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
 
   if (config.l0_dst_split) {
     int dst_dim = dst->shape.size();
-    new_args.push_back(dst->shape[dst_dim - 2]);
-    new_args.push_back(dst->shape[dst_dim - 1]);
+    PrimExpr dm = dst->shape[dst_dim - 2];
+    PrimExpr dn = dst->shape[dst_dim - 1];
+    // realK overrides the L0 fractal's K extent (= copy_l1_to_l0a/b dstM/dstN)
+    // so it matches the mma's k_actual. K is the LAST trailing dim for
+    // matrix_a ([M,K]) and the FIRST for matrix_b ([K,N]). realK==0 (default)
+    // keeps dst->shape -- byte-identical for every existing l1->l0 copy.
+    const auto *rk_imm = realK.as<IntImmNode>();
+    if (!(rk_imm && rk_imm->value == 0)) {
+      if (dst.scope() == "wmma.matrix_a") {
+        dn = realK;
+      } else if (dst.scope() == "wmma.matrix_b") {
+        dm = realK;
+      }
+    }
+    new_args.push_back(dm);
+    new_args.push_back(dn);
   }
 
   if (config.l0c2gm) {
-    new_args.push_back(compute_strideN(dst, dst_extents));
-    new_args.push_back(validRow_dst);
-    new_args.push_back(validCol_dst);
+    new_args.push_back(compute_strideN(dst, dst_extents)); // realDstN
+    new_args.push_back(validRow_dst);                      // realTailM
+    new_args.push_back(validCol_dst);                      // realTailN
+    // 4th runtime arg = copy_l0c_to_gm's unitFlag (default 0). Emitted by the
+    // codegen (kCopyOpExtraArgs["copy_l0c_to_gm"]==4); fuses fixpipe with the
+    // preceding mma when set to 0b11, else 0 = the original standalone fixpipe.
+    new_args.push_back(unitFlag);
     new_args.push_back(src->shape[src->shape.size() - 2]);
     new_args.push_back(src->shape[src->shape.size() - 1]);
     new_args.push_back(Bool(enRelu)); // Add enable_relu parameter
@@ -1265,7 +1297,10 @@ TIR_DEFINE_TL_BUILTIN(ascend_use_swizzle)
                                Integer(CallEffectKind::kOpaque));
 
 TIR_DEFINE_TL_BUILTIN(ascend_mma)
-    .set_num_inputs(6)
+    // -1 (variadic): 6 args = legacy mma<...>(A,B,C,init,K); 8 args add the
+    // optional n_actual + unitFlag tail (the C++ mma template's trailing
+    // defaulted params), so existing 6-arg callers are byte-for-byte unchanged.
+    .set_num_inputs(-1)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
 
