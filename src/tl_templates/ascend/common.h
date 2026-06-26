@@ -658,6 +658,17 @@ reduce_min(LocalTensor<T> const &dstTensor, LocalTensor<T> const &srcTensor,
 }
 
 static constexpr uint32_t L0AB_EVENT = 0;
+// Dedicated event ids for the L0AB M_MTE1/MTE1_M ping-pong when a caller hoists
+// the prime/drain out of gemm_v0_fixp (prime_drain=false): the two flags are then
+// held SET across the whole cube loop, so they must NOT share an id with the
+// per-call MTE2_MTE1/MTE1_MTE2 self-pair fences (which stay on L0AB_EVENT=0) --
+// otherwise the next call's SetFlag<MTE2_MTE1>(0) collides with the held
+// M_MTE1(0) on the same physical flag register. Faithful to the reference, which
+// puts M_MTE1 on its own EVENT_ID3/4 disjoint from the L1 flags. Ids {4,5} are
+// free in the SWA kernel (KV flags use {2,3}, the self-pair fences use {0,1}).
+// The default (prime_drain=true) keeps M_MTE1/MTE1_M on L0AB_EVENT so every
+// existing caller is byte-for-byte unchanged.
+static constexpr uint32_t L0AB_MM_EVENT = 4;
 
 template <typename T1, typename T2, uint32_t M, uint32_t N, uint32_t K,
           bool transpose_A = false, bool transpose_B = false>
@@ -793,7 +804,8 @@ gemm_v0_fixp(LocalTensor<T1> const &A, LocalTensor<T1> const &B,
              GlobalTensor<T2> dst,     // GM destination [M, N], row major
              AscendC::TBuf<AscendC::TPosition::A2> &l0a_,
              AscendC::TBuf<AscendC::TPosition::B2> &l0b_, bool clear,
-             uint32_t k_actual, uint32_t n_actual = N, uint32_t cl0_base = 0) {
+             uint32_t k_actual, uint32_t n_actual = N, uint32_t cl0_base = 0,
+             bool prime_drain = true) {
   auto l0a = l0a_.Get<T1>();
   auto l0b = l0b_.Get<T1>();
   constexpr uint32_t kL0Size = 128;
@@ -811,8 +823,27 @@ gemm_v0_fixp(LocalTensor<T1> const &A, LocalTensor<T1> const &B,
   // cl0_base: the starting cL0 ping-pong slot for this call, so QK and PV share
   // ONE persistent cL0TensorPingPong rotation (= the reference advancing one
   // cL0BufIter across ComputeMm1 then ComputeMm2). Default 0 = standalone.
+  //
+  // prime_drain: when true (default) this call self-primes and self-drains its
+  // two M_MTE1 L0AB ping-pong flags (the original self-contained behaviour --
+  // every existing caller is byte-for-byte unchanged). When false the caller is
+  // responsible for priming the flags ONCE before the cube loop and draining
+  // them ONCE after (faithful to the reference's AllocEventID/FreeEventID:
+  // block_cube.h:225-226/239-240 SetFlag/WaitFlag<M_MTE1>(L0AB_EVENT0/1)), so
+  // back-to-back QK/PV calls no longer re-prime+drain the L0AB ring at every
+  // call boundary -- ComputeMm1/Mm2 never touch the L0AB flag lifecycle, only
+  // the per-slot Wait/Set inside the tile loop (block_cube.h:563/583). The
+  // per-slot Wait/Set still protect L0A/L0B buffer reuse; the SWA cadence makes
+  // each call start at abL0 parity 0 (every call advances abL0BufIter by an even
+  // 4), so the local tileIdx reset is equivalent to a persistent abL0BufIter.
   uint32_t kL0split = (K + kL0Size - 1) / kL0Size;
   bool initflag = false;
+  // L0AB M_MTE1/MTE1_M ping-pong event base. prime_drain=true keeps it on
+  // L0AB_EVENT (byte-identical to all existing callers); prime_drain=false moves
+  // it to the dedicated L0AB_MM_EVENT so the held-across-the-loop M_MTE1 flags do
+  // not collide with the per-call MTE2_MTE1/MTE1_MTE2 self-pair fences (which stay
+  // on L0AB_EVENT). The caller primes/drains M_MTE1(L0AB_MM_EVENT, +1) once.
+  const uint32_t mmEv = prime_drain ? L0AB_EVENT : L0AB_MM_EVENT;
 
   // N tiling: identical to gemm_v0 (B tile (kL0Size x nTile) must fit the 32KB
   // L0B ping-pong slot). C is a single [M, nTile] slot reused per N-tile.
@@ -826,8 +857,13 @@ gemm_v0_fixp(LocalTensor<T1> const &A, LocalTensor<T1> const &B,
   SetFlag<HardEvent::MTE2_MTE1>(L0AB_EVENT);
   WaitFlag<HardEvent::MTE2_MTE1>(L0AB_EVENT);
 
-  SetFlag<HardEvent::M_MTE1>(L0AB_EVENT);
-  SetFlag<HardEvent::M_MTE1>(L0AB_EVENT + 1);
+  // L0AB ring prime: self-contained (prime_drain=true) re-arms both M_MTE1 slots
+  // every call; shared mode (prime_drain=false) relies on the caller's once-per-
+  // cube-loop AllocEventID prime instead (the faithful structure).
+  if (prime_drain) {
+    SetFlag<HardEvent::M_MTE1>(mmEv);
+    SetFlag<HardEvent::M_MTE1>(mmEv + 1);
+  }
 
   // cL0 ping-pong over N-tiles, faithful to the Ascend C reference ComputeMm2
   // (block_cube.h:833-940): two L0C slots picked by cL0BufIter%2; the
@@ -857,7 +893,7 @@ gemm_v0_fixp(LocalTensor<T1> const &A, LocalTensor<T1> const &B,
       uint32_t l0a_base = pp * (M * kL0Size);
       uint32_t l0b_base = pp * (nTile * kL0Size);
 
-      WaitFlag<HardEvent::M_MTE1>(L0AB_EVENT + pp);
+      WaitFlag<HardEvent::M_MTE1>(mmEv + pp);
       if constexpr (!transpose_A) {
         tl::ascend::copy_l1_to_l0a<T1, M, K>(l0a[l0a_base],
                                              A[kL0Idx * M * kL0Size], M, kSize);
@@ -874,8 +910,8 @@ gemm_v0_fixp(LocalTensor<T1> const &A, LocalTensor<T1> const &B,
         tl::ascend::copy_l1_to_l0b<T1, N, K, true>(
             l0b[l0b_base], B[kL0Idx * N * kL0Size], kSize, n_actual);
       }
-      SetFlag<HardEvent::MTE1_M>(L0AB_EVENT + pp);
-      WaitFlag<HardEvent::MTE1_M>(L0AB_EVENT + pp);
+      SetFlag<HardEvent::MTE1_M>(mmEv + pp);
+      WaitFlag<HardEvent::MTE1_M>(mmEv + pp);
       // accumulate this N-tile's K into the selected L0C slot; unitFlag drives
       // the mma->fixpipe pipeline so the next N-tile (other slot) overlaps.
       // Faithful to ComputeMm1/Mm2:577-582/910-914 -- WaitFlag<MTE1_M> then Mmad
@@ -889,7 +925,7 @@ gemm_v0_fixp(LocalTensor<T1> const &A, LocalTensor<T1> const &B,
       if ((M / 16u) * (mmaN / 16u) < 10u) {
         PipeBarrier<PIPE_M>();
       }
-      SetFlag<HardEvent::M_MTE1>(L0AB_EVENT + pp);
+      SetFlag<HardEvent::M_MTE1>(mmEv + pp);
       tileIdx++;
     }
 
@@ -908,8 +944,14 @@ gemm_v0_fixp(LocalTensor<T1> const &A, LocalTensor<T1> const &B,
     cL0BufIter++;
   }
 
-  WaitFlag<HardEvent::M_MTE1>(L0AB_EVENT);
-  WaitFlag<HardEvent::M_MTE1>(L0AB_EVENT + 1);
+  // L0AB ring drain: self-contained (prime_drain=true) drains both M_MTE1 slots
+  // every call; shared mode (prime_drain=false) leaves them for the caller's
+  // once-per-cube-loop FreeEventID drain (= the faithful AllocEventID/FreeEventID
+  // structure -- the L0AB ring lives across all ComputeMm1/Mm2 calls).
+  if (prime_drain) {
+    WaitFlag<HardEvent::M_MTE1>(mmEv);
+    WaitFlag<HardEvent::M_MTE1>(mmEv + 1);
+  }
 
   SetFlag<HardEvent::MTE1_MTE2>(L0AB_EVENT);
   WaitFlag<HardEvent::MTE1_MTE2>(L0AB_EVENT);
