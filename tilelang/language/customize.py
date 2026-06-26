@@ -112,8 +112,26 @@ def view(src: Buffer, shape: list[PrimExpr] | None = None, dtype: str | None = N
     return T.Buffer(shape, dtype, src.data)
 
 
-def npu_gemm(A, B, C, init=False):
-    """NPU GEMM intrinsic. A, B, C can be 2D or higher-order (leading dims must be 1)."""
+def npu_gemm(A, B, C, init=False, n_actual=None, unit_flag=None, k_actual=None):
+    """NPU GEMM intrinsic. A, B, C can be 2D or higher-order (leading dims must be 1).
+
+    n_actual / unit_flag (both default ``None``): optional trailing args that map
+    to the C++ ``mma`` template's ``n_actual`` (runtime output-column count, <= N)
+    and ``unitFlag`` (0b10 accumulate / 0b11 flush, drives the hardware mma->fixpipe
+    pipeline for the cL0 ping-pong overlap). When BOTH are ``None`` the call emits
+    the legacy 6-arg form (``mma<...>(A, B, C, init, K)``) so every existing caller
+    is byte-for-byte unchanged (the C++ defaults are ``n_actual=N``, ``unitFlag=0``).
+    Used by the kernel-driven ring-aware decomposition (Layer ③) to fuse a
+    standalone ``T.mma`` with a following ``T.copy(L0C->GM, unit_flag=0b11)`` fixpipe.
+
+    k_actual (default ``None``): runtime contraction length passed as the C++ mma's
+    ``K`` arg, OVERRIDING the value derived from ``A``'s last dim. Lets the operands
+    stay FULL buffers (e.g. a [G,128] L0A) while the mma contracts only ``k_actual``
+    columns (= the reference's runtime ``kSize`` / ``k_actual=winm``). Needed because
+    a symbolic slice operand (``p_l0a[pp,:,0:winm]``) makes ``access_ptr`` call
+    ``int(winm)`` on a Var and fail; passing full operands + ``k_actual`` avoids that
+    and matches ``gemm_v0_fixp`` (which loads the full tile and contracts ``kSize``).
+    """
 
     def legalize_arguments(arg: Buffer | Var):
         """Convert let-bound variables to their corresponding buffers.
@@ -198,7 +216,16 @@ def npu_gemm(A, B, C, init=False):
     Bptr = retrieve_ptr(B, "r")
     Cptr = retrieve_ptr(C, "w" if init is True else "rw")
 
-    return tir.call_intrin("handle", tir.op.Op.get("tl.ascend_mma"), f"mma<{_dtype(A)}, {_dtype(C)}, {M}, {N}>", Aptr, Bptr, Cptr, init, K)
+    # K runtime arg: k_actual overrides the shape-derived K (operands stay full;
+    # the mma contracts only k_actual). The <M,N> template params are unaffected.
+    K_runtime = k_actual if k_actual is not None else K
+    mma_args = [f"mma<{_dtype(A)}, {_dtype(C)}, {M}, {N}>", Aptr, Bptr, Cptr, init, K_runtime]
+    if n_actual is not None or unit_flag is not None:
+        # positional in the C++ template: (..., K, n_actual=N, unitFlag=0). To set
+        # unit_flag we must also supply n_actual, so default the unset one.
+        mma_args.append(n_actual if n_actual is not None else N)
+        mma_args.append(unit_flag if unit_flag is not None else 0)
+    return tir.call_intrin("handle", tir.op.Op.get("tl.ascend_mma"), *mma_args)
 
 
 def loop_break():

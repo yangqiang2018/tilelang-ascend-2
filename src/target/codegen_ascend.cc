@@ -2393,8 +2393,13 @@ void CodeGenTileLangAscend::MmaCodegen(const CallNode *op) {
   this->PrintIndent();
   this->stream << op_name << "(" << a_name << "[" << a_offset << "]," << b_name
                << "[" << b_offset << "]," << c_name << "[" << c_offset << "], "
-               << PrintExpr(op->args[4]) << ", " << PrintExpr(op->args[5])
-               << ");\n";
+               << PrintExpr(op->args[4]) << ", " << PrintExpr(op->args[5]);
+  // optional trailing args (n_actual, unitFlag) for the kernel-driven fused mma;
+  // absent for legacy 6-arg callers (template fills n_actual=N, unitFlag=0).
+  for (size_t i = 6; i < op->args.size(); ++i) {
+    this->stream << ", " << PrintExpr(op->args[i]);
+  }
+  this->stream << ");\n";
 }
 
 void CodeGenTileLangAscend::CopyCodegen(const CallNode *op) {
@@ -2429,7 +2434,10 @@ void CodeGenTileLangAscend::CopyCodegen(const CallNode *op) {
   auto dst_type = GetAccessPtrDtype(op->args[2].as<CallNode>());
 
   static const std::unordered_map<std::string, int> kCopyOpExtraArgs = {
-      {"copy_l0c_to_gm", 3},      {"copy_gm_to_l1", 3},
+      // copy_l0c_to_gm: 4 extra = realDstN, realTailM, realTailN, unitFlag.
+      // unitFlag is always emitted (AscendCopy::Lower pushes 0 when unset), so a
+      // standalone fixpipe stays byte-identical (the template default was 0).
+      {"copy_l0c_to_gm", 4},      {"copy_gm_to_l1", 3},
       {"copy_l1_to_l0a", 2},      {"copy_l1_to_l0b", 2},
       {"copy_gm_to_ub", 4},       {"copy_ub_to_gm", 3},
       {"atomic_add_ub_to_gm", 3}, {"atomic_add_l0c_to_gm", 3},
