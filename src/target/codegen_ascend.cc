@@ -2155,12 +2155,14 @@ void CodeGenTileLangAscend::GemmOpCodegen(const CallNode *op) {
 
 void CodeGenTileLangAscend::GemmFixpOpCodegen(const CallNode *op) {
   // args: [0]=template name, [1]=A, [2]=B, [3]=C (L0C), [4]=dst (GM), [5]=init,
-  // [6]=k_actual, [7]=n_actual, [8]=cl0_base, [9]=prime_drain. Same shape as
-  // GemmOpCodegen plus the GM destination operand, the runtime contraction
-  // length, the runtime output-column count, the shared cL0 ping-pong base slot,
-  // and whether the call self-primes/drains its L0AB ring (false = the caller
-  // primes once before the cube loop); the per-N-tile fixpipe lives inside the
-  // template.
+  // [6]=k_actual, [7]=n_actual, [8]=cl0_base, [9]=prime_drain, [10]=flush_last,
+  // [11]=do_fixpipe. Same shape as GemmOpCodegen plus the GM destination operand,
+  // the runtime contraction length, the runtime output-column count, the shared
+  // cL0 ping-pong base slot, whether the call self-primes/drains its L0AB ring
+  // (false = the caller primes once before the cube loop), and the per-K-chunk
+  // accumulation controls (flush_last=false keeps every tile 0b10, do_fixpipe=
+  // false skips the copy-out so the cL0 keeps accumulating across chunks); the
+  // per-N-tile fixpipe lives inside the template.
   std::string op_name =
       "tl::ascend::" + Downcast<StringImm>(op->args[0])->value;
 
@@ -2185,7 +2187,8 @@ void CodeGenTileLangAscend::GemmFixpOpCodegen(const CallNode *op) {
                << d_name << "[" << d_offset
                << "], ascend_l0a, ascend_l0b, " << PrintExpr(op->args[5]) << ", "
                << PrintExpr(op->args[6]) << ", " << PrintExpr(op->args[7]) << ", "
-               << PrintExpr(op->args[8]) << ", " << PrintExpr(op->args[9])
+               << PrintExpr(op->args[8]) << ", " << PrintExpr(op->args[9]) << ", "
+               << PrintExpr(op->args[10]) << ", " << PrintExpr(op->args[11])
                << ");\n";
 }
 
