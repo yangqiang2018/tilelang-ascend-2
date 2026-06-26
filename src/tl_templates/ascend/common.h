@@ -194,6 +194,16 @@ CATLASS_DEVICE void mma(LocalTensor<T1> const A, LocalTensor<T1> const B,
   mmadParams.n = n_actual;
   mmadParams.k = K;
   mmadParams.cmatrixInitVal = init;
+  // cmatrixSource = false: faithful to the reference (block_cube.h:576 sets it
+  // explicitly on EVERY Mmad). MmadParams does not default-initialise this field,
+  // and the hardware reads it whenever cmatrixInitVal==false (an accumulate mma,
+  // C sourced from L0C). The single-mma callers never hit it -- gemm_v0 (unitFlag
+  // off) is insensitive, and PV's gemm_v0_fixp uses cmatrixInitVal==true (single K
+  // tile, no accumulate) -- but QK's multi-K accumulate (cmatrixInitVal==false on
+  // tiles 1..3) + unitFlag read the uninitialised field and hung the cube. Setting
+  // it false is the faithful fix and byte-compatible (every caller's accumulate
+  // semantics were already 'source from L0C').
+  mmadParams.cmatrixSource = false;
   // unitFlag drives the hardware mma->fixpipe pipeline (0b10 accumulate / 0b11
   // flush), faithful to the Ascend C reference's cL0TensorPingPong overlap
   // (block_cube.h ComputeMm2:910). Defaults to 0 (off) so every pre-existing
@@ -783,19 +793,24 @@ gemm_v0_fixp(LocalTensor<T1> const &A, LocalTensor<T1> const &B,
              GlobalTensor<T2> dst,     // GM destination [M, N], row major
              AscendC::TBuf<AscendC::TPosition::A2> &l0a_,
              AscendC::TBuf<AscendC::TPosition::B2> &l0b_, bool clear,
-             uint32_t k_actual) {
+             uint32_t k_actual, uint32_t n_actual = N, uint32_t cl0_base = 0) {
   auto l0a = l0a_.Get<T1>();
   auto l0b = l0b_.Get<T1>();
   constexpr uint32_t kL0Size = 128;
-  // k_actual: the runtime contraction length (<= K). Only the first k_actual
-  // rows of the K dim are loaded into L0 and contracted -- faithful to the
-  // Ascend C reference contracting over the actual window (kSize=actualWindow),
-  // not the padded tile. This is what keeps the PV from summing the unwritten
-  // pad rows of a paged KV tile (kv_l1[win:BI]): those rows are uninitialised
-  // L1 on first use, and summing 0 (masked P) * NaN (garbage V) -> NaN. Single
-  // K tile only (K <= kL0Size); every gemm_v0_fixp caller satisfies it.
-  static_assert(K <= kL0Size,
-                "gemm_v0_fixp assumes a single K tile (K <= 128) for k_actual");
+  // k_actual: the runtime contraction length (<= K), split across ceil(K/128)
+  // kL0 tiles that K-accumulate into ONE cL0 slot. PV passes k_actual=window
+  // (<=128, single tile, the original 008 behaviour); QK passes k_actual=K=512
+  // (head dim, 4 tiles) so QK joins this same fused-fixpipe path (= ComputeMm1).
+  // Contracting only k_actual keeps the PV from summing the unwritten pad rows
+  // of a paged KV tile (0 (masked P) * NaN (garbage V) -> NaN).
+  //
+  // n_actual: runtime output-column count (<= N), honoured on the transpose_B
+  // (single N-tile) path = QK's window width; defaults to N so the non-transpose
+  // PV path is byte-for-byte unchanged.
+  //
+  // cl0_base: the starting cL0 ping-pong slot for this call, so QK and PV share
+  // ONE persistent cL0TensorPingPong rotation (= the reference advancing one
+  // cL0BufIter across ComputeMm1 then ComputeMm2). Default 0 = standalone.
   uint32_t kL0split = (K + kL0Size - 1) / kL0Size;
   bool initflag = false;
 
@@ -823,14 +838,19 @@ gemm_v0_fixp(LocalTensor<T1> const &A, LocalTensor<T1> const &B,
   uint32_t tileIdx = 0;
   for (uint32_t nL0Idx = 0; nL0Idx < nL0split; nL0Idx++) {
     uint32_t bNOffset = transpose_B ? 0u : (nL0Idx * nTile * kRound);
-    uint32_t c_base = (cL0BufIter & 1) * (M * nTile); // 2-slot L0C select
+    uint32_t c_base =
+        ((cl0_base + cL0BufIter) & 1) * (M * nTile); // shared 2-slot L0C select
 
     for (uint32_t kL0Idx = 0; kL0Idx < kL0split; kL0Idx++) {
       initflag = (clear && (kL0Idx == 0));
-      // single K tile (K<=128): contract only the actual window length.
-      uint32_t kSize = k_actual;
+      // per-K-tile contraction length: PV (kL0split==1) -> the whole k_actual;
+      // QK (kL0split==4) -> 128 per tile, the last is the tail. K accumulates
+      // across tiles into the same cL0 slot (initflag only on the first tile).
+      uint32_t kRemain = k_actual - kL0Idx * kL0Size;
+      uint32_t kSize = (kRemain < kL0Size) ? kRemain : kL0Size;
       // last K sub-tile flushes (0b11); earlier ones accumulate (0b10) --
-      // faithful to ComputeMm2:910. (K<=128 here => single tile => always 0b11.)
+      // faithful to ComputeMm1/Mm2 (block_cube.h:577-578/910). (K<=128 here =>
+      // single tile => always 0b11.)
       uint8_t unitFlag = (kL0Idx == kL0split - 1) ? 0b11 : 0b10;
       uint32_t pp = (tileIdx & 1);
 
@@ -849,20 +869,24 @@ gemm_v0_fixp(LocalTensor<T1> const &A, LocalTensor<T1> const &B,
         tl::ascend::copy_l1_to_l0b<T1, K, N>(
             l0b[l0b_base], B[bNOffset + kL0Idx * 16 * kL0Size], kSize, nTile);
       } else {
+        // transpose_B (QK): load only the n_actual real columns (window rows of
+        // K^T); the [n_actual:N] columns stay unloaded (masked downstream).
         tl::ascend::copy_l1_to_l0b<T1, N, K, true>(
-            l0b[l0b_base], B[kL0Idx * N * kL0Size], kSize, N);
+            l0b[l0b_base], B[kL0Idx * N * kL0Size], kSize, n_actual);
       }
       SetFlag<HardEvent::MTE1_M>(L0AB_EVENT + pp);
       WaitFlag<HardEvent::MTE1_M>(L0AB_EVENT + pp);
       // accumulate this N-tile's K into the selected L0C slot; unitFlag drives
       // the mma->fixpipe pipeline so the next N-tile (other slot) overlaps.
-      // Faithful to ComputeMm2:902-914 -- WaitFlag<MTE1_M> then Mmad directly
-      // (NO PipeBarrier<PIPE_M> before the mma; that would drain the M pipe and
-      // defeat the cL0 ping-pong), with the tiny-tile hazard barrier only AFTER
-      // and only when (M/16)*(nTile/16) < 10 (a no-op for PV's 4*8=32).
+      // Faithful to ComputeMm1/Mm2:577-582/910-914 -- WaitFlag<MTE1_M> then Mmad
+      // directly (NO PipeBarrier<PIPE_M> before; that drains the M pipe and
+      // defeats the cL0 ping-pong), tiny-tile hazard barrier only AFTER and gated
+      // on the RUNTIME mma n (mmadParams.n): nTile for PV (always 128 -> none),
+      // n_actual (window width) for QK -- the reference uses the runtime n.
+      uint32_t mmaN = transpose_B ? n_actual : nTile;
       tl::ascend::mma<T1, T2, M, nTile>(l0a[l0a_base], l0b[l0b_base], C[c_base],
-                                        initflag, kSize, nTile, unitFlag);
-      if constexpr ((M / 16u) * (nTile / 16u) < 10u) {
+                                        initflag, kSize, mmaN, unitFlag);
+      if ((M / 16u) * (mmaN / 16u) < 10u) {
         PipeBarrier<PIPE_M>();
       }
       SetFlag<HardEvent::M_MTE1>(L0AB_EVENT + pp);
@@ -872,8 +896,15 @@ gemm_v0_fixp(LocalTensor<T1> const &A, LocalTensor<T1> const &B,
     // N-tile done: fixpipe C[c_base] -> dst column band. unitFlag 0b11 pairs
     // with the Mmad unitFlag (hardware mma->fixpipe pipeline); no software
     // M_FIX/FIX_M flag -- the next N-tile uses the other L0C slot and overlaps.
+    // realTailN = mmaN (the columns the mma actually wrote): the fixpipe's nSize
+    // MUST equal the mma's n, faithful to the reference (block_cube.h: mmadParams.n
+    // == fixParams.nSize == nL1SizeAlign). For PV mmaN == nTile so realTailN == 0
+    // (-> nTile, unchanged); for QK mmaN == n_actual (window width < nTile) -- if
+    // the fixpipe instead copied the full nTile, the unitFlag fixpipe would wait
+    // for cL0 columns [n_actual:nTile] that no mma ever marked ready -> HANG.
+    uint32_t fixN = transpose_B ? n_actual : nTile;
     tl::ascend::copy_l0c_to_gm<T2, T2, LayoutGM, M, nTile>(
-        dst[nL0Idx * nTile], C[c_base], N, 0, 0, 0b11);
+        dst[nL0Idx * nTile], C[c_base], N, 0, fixN, 0b11);
     cL0BufIter++;
   }
 

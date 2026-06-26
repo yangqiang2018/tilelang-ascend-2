@@ -419,7 +419,18 @@ def gemm_v0(A, B, C, transpose_A=False, transpose_B=False, init=False, n_actual=
     )
 
 
-def gemm_v0_fixp(A, B, C, dst, k_actual=None, transpose_A=False, transpose_B=False, init=False):
+def gemm_v0_fixp(
+    A,
+    B,
+    C,
+    dst,
+    k_actual=None,
+    transpose_A=False,
+    transpose_B=False,
+    init=False,
+    n_actual=None,
+    cl0_base=0,
+):
     """GEMM with the per-N-tile fixpipe fused in (faithful to Ascend C ComputeMm2).
 
     Same as :func:`gemm_v0` but, instead of leaving the whole ``[M, N]`` result
@@ -441,6 +452,12 @@ def gemm_v0_fixp(A, B, C, dst, k_actual=None, transpose_A=False, transpose_B=Fal
             unwritten pad rows of a paged tile (kv_l1[win:BI]), which would make
             0 (masked P) * NaN (uninitialised V) -> NaN. Defaults to the full K.
         transpose_A, transpose_B, init: as in :func:`gemm_v0`.
+        n_actual: runtime output-column count (<= N), honoured on the transpose_B
+            (single N-tile) path = QK's window width. Defaults to N (the
+            non-transpose PV path is unchanged).
+        cl0_base: starting cL0 ping-pong slot, so QK and PV share ONE persistent
+            cL0TensorPingPong rotation (= the reference's single cL0BufIter across
+            ComputeMm1 then ComputeMm2). Default 0 = standalone.
     """
     A = _legalize_arguments(A)
     B = _legalize_arguments(B)
@@ -455,6 +472,10 @@ def gemm_v0_fixp(A, B, C, dst, k_actual=None, transpose_A=False, transpose_B=Fal
     K = A_shape[-2] if transpose_A else A_shape[-1]
     if k_actual is None:
         k_actual = K
+    # n_actual: runtime output columns (<= N), the transpose_B (QK) window width.
+    # Defaults to N so the non-transpose PV path is byte-for-byte unchanged.
+    if n_actual is None:
+        n_actual = N
 
     Aptr = _retrieve_ptr(A, "r")
     Bptr = _retrieve_ptr(B, "r")
@@ -471,6 +492,8 @@ def gemm_v0_fixp(A, B, C, dst, k_actual=None, transpose_A=False, transpose_B=Fal
         Dptr,
         init,
         k_actual,
+        n_actual,
+        cl0_base,
     )
 
 
