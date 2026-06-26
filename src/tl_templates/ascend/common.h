@@ -805,7 +805,8 @@ gemm_v0_fixp(LocalTensor<T1> const &A, LocalTensor<T1> const &B,
              AscendC::TBuf<AscendC::TPosition::A2> &l0a_,
              AscendC::TBuf<AscendC::TPosition::B2> &l0b_, bool clear,
              uint32_t k_actual, uint32_t n_actual = N, uint32_t cl0_base = 0,
-             bool prime_drain = true) {
+             bool prime_drain = true, bool flush_last = true,
+             bool do_fixpipe = true) {
   auto l0a = l0a_.Get<T1>();
   auto l0b = l0b_.Get<T1>();
   constexpr uint32_t kL0Size = 128;
@@ -836,7 +837,23 @@ gemm_v0_fixp(LocalTensor<T1> const &A, LocalTensor<T1> const &B,
   // per-slot Wait/Set still protect L0A/L0B buffer reuse; the SWA cadence makes
   // each call start at abL0 parity 0 (every call advances abL0BufIter by an even
   // 4), so the local tileIdx reset is equivalent to a persistent abL0BufIter.
-  uint32_t kL0split = (K + kL0Size - 1) / kL0Size;
+  //
+  // flush_last / do_fixpipe: per-K-chunk accumulation. The reference loads the K
+  // (or D) dimension as several GM->L1 chunks (ComputeMm1 splits headDim into 2x
+  // 256 kL1 halves, block_cube.h:341-450), each into its own L1 ring slot, and
+  // the cube accumulates them into ONE cL0 slot before a single Fixpipe. To drive
+  // that from the kernel, call gemm_v0_fixp once per chunk into the SAME cl0_base
+  // slot: chunk 0 with clear=true, flush_last=false, do_fixpipe=false (its last
+  // kL0 stays 0b10, no flush, no copy-out); the final chunk with clear=false,
+  // flush_last=true, do_fixpipe=true (its last kL0 is 0b11 and the Fixpipe flushes
+  // the fully-accumulated cL0). Both default true = the old single-call behaviour
+  // (every existing caller byte-for-byte unchanged).
+  //
+  // kL0split is over the RUNTIME k_actual (this chunk's contraction length), not
+  // the compile-time K: a 256-wide D-chunk runs 2 kL0 tiles, the whole 512 runs 4,
+  // PV's window<=128 runs 1. For the existing callers k_actual==K so kL0split is
+  // unchanged (byte-compatible); a chunk passes k_actual=256 (= its own K=256).
+  uint32_t kL0split = (k_actual + kL0Size - 1) / kL0Size;
   bool initflag = false;
   // L0AB M_MTE1/MTE1_M ping-pong event base. prime_drain=true keeps it on
   // L0AB_EVENT (byte-identical to all existing callers); prime_drain=false moves
@@ -885,9 +902,11 @@ gemm_v0_fixp(LocalTensor<T1> const &A, LocalTensor<T1> const &B,
       uint32_t kRemain = k_actual - kL0Idx * kL0Size;
       uint32_t kSize = (kRemain < kL0Size) ? kRemain : kL0Size;
       // last K sub-tile flushes (0b11); earlier ones accumulate (0b10) --
-      // faithful to ComputeMm1/Mm2 (block_cube.h:577-578/910). (K<=128 here =>
-      // single tile => always 0b11.)
-      uint8_t unitFlag = (kL0Idx == kL0split - 1) ? 0b11 : 0b10;
+      // faithful to ComputeMm1/Mm2 (block_cube.h:577-578/910). flush_last=false
+      // (a non-final K-chunk) keeps EVERY tile at 0b10 so the cL0 keeps
+      // accumulating across chunks; only the final chunk's last tile flushes.
+      uint8_t unitFlag =
+          (flush_last && kL0Idx == kL0split - 1) ? 0b11 : 0b10;
       uint32_t pp = (tileIdx & 1);
 
       uint32_t l0a_base = pp * (M * kL0Size);
@@ -938,9 +957,14 @@ gemm_v0_fixp(LocalTensor<T1> const &A, LocalTensor<T1> const &B,
     // (-> nTile, unchanged); for QK mmaN == n_actual (window width < nTile) -- if
     // the fixpipe instead copied the full nTile, the unitFlag fixpipe would wait
     // for cL0 columns [n_actual:nTile] that no mma ever marked ready -> HANG.
-    uint32_t fixN = transpose_B ? n_actual : nTile;
-    tl::ascend::copy_l0c_to_gm<T2, T2, LayoutGM, M, nTile>(
-        dst[nL0Idx * nTile], C[c_base], N, 0, fixN, 0b11);
+    // do_fixpipe=false (a non-final K-chunk): skip the copy-out, the cL0 slot
+    // keeps accumulating; only the final chunk flushes (faithful to the reference
+    // doing a single Fixpipe after all kL1 chunks have accumulated, cube.h:591).
+    if (do_fixpipe) {
+      uint32_t fixN = transpose_B ? n_actual : nTile;
+      tl::ascend::copy_l0c_to_gm<T2, T2, LayoutGM, M, nTile>(
+          dst[nL0Idx * nTile], C[c_base], N, 0, fixN, 0b11);
+    }
     cL0BufIter++;
   }
 

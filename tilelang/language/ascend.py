@@ -431,6 +431,8 @@ def gemm_v0_fixp(
     n_actual=None,
     cl0_base=0,
     prime_drain=True,
+    flush_last=True,
+    do_fixpipe=True,
 ):
     """GEMM with the per-N-tile fixpipe fused in (faithful to Ascend C ComputeMm2).
 
@@ -462,10 +464,19 @@ def gemm_v0_fixp(
         prime_drain: when True (default) the call self-primes/drains its two
             M_MTE1 L0AB ping-pong flags (self-contained, every existing caller
             byte-for-byte unchanged). Pass False when the caller primes the flags
-            ONCE before the cube loop (``set_flag("m", "mte1", 0/1)``) and drains
-            them ONCE after (``wait_flag("m", "mte1", 0/1)``) -- faithful to the
+            ONCE before the cube loop (``set_flag("m", "mte1", 4/5)``) and drains
+            them ONCE after (``wait_flag("m", "mte1", 4/5)``) -- faithful to the
             reference's AllocEventID/FreeEventID, so back-to-back QK/PV calls no
             longer re-prime+drain the L0AB ring at every call boundary.
+        flush_last, do_fixpipe: per-K-chunk accumulation. The reference loads the
+            K/D dimension as several GM->L1 chunks (ComputeMm1 splits headDim into
+            2x256), each into its own L1 ring slot, accumulating into ONE cL0 slot
+            before a single Fixpipe. To drive that, call this once per chunk into
+            the SAME ``cl0_base``: chunk 0 with ``init=True, flush_last=False,
+            do_fixpipe=False`` (no flush, no copy-out -- keeps accumulating); the
+            final chunk with ``init=False, flush_last=True, do_fixpipe=True`` (last
+            tile 0b11 + Fixpipe). ``k_actual`` is the chunk's own width (e.g. 256).
+            Both default True = the old single-call behaviour (callers unchanged).
     """
     A = _legalize_arguments(A)
     B = _legalize_arguments(B)
@@ -503,6 +514,8 @@ def gemm_v0_fixp(
         n_actual,
         cl0_base,
         prime_drain,
+        flush_last,
+        do_fixpipe,
     )
 
 
