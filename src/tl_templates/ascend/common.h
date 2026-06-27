@@ -1229,6 +1229,38 @@ CATLASS_DEVICE void row_expand_sub(const LocalTensor<T> &dst,
   }
 }
 
+// Row-broadcast multiplication: dst[i, j] = src0[i, j] * src1_col[i]. Same scheme
+// as row_expand_div (Brcb the [M,1] column into an [M, blk] tile, then Mul with
+// src1BlkStride=0 / src1RepStride=1) -- the faithful equivalent of the Ascend C
+// reference's RowMuls (cfa/scfa flash-attention PV rescale: multiply the previous
+// KV-tile's partial output by the per-row exp(m_old - m_new) factor). The non-PTO
+// counterpart of the PTO TROWEXPANDMUL; emitted by tl.ascend_row_expand_mul_nd.
+template <typename T, uint32_t M, uint32_t N>
+CATLASS_DEVICE void row_expand_mul(const LocalTensor<T> &dst,
+                                   const LocalTensor<T> &src0,
+                                   const LocalTensor<T> &src1_col,
+                                   const LocalTensor<T> &tmp) {
+  constexpr uint32_t BLK = 32 / sizeof(T);
+  constexpr uint32_t MASK = 256 / sizeof(T);
+  static_assert(N % MASK == 0,
+                "row_expand_mul requires N % (256/sizeof(T)) == 0");
+  static_assert(N / MASK <= M,
+                "row_expand_mul assumes N/MASK <= M (row-repeat branch only)");
+  AscendC::Brcb(tmp, src1_col, (M + BLK - 1) / BLK,
+                AscendC::BrcbRepeatParams(1, BLK));
+  AscendC::PipeBarrier<PIPE_V>();
+  AscendC::BinaryRepeatParams rp;
+  rp.src0BlkStride = 1;
+  rp.src1BlkStride = 0;
+  rp.dstBlkStride = 1;
+  rp.src0RepStride = N / BLK;
+  rp.src1RepStride = 1;
+  rp.dstRepStride = N / BLK;
+  for (uint32_t i = 0; i < N / MASK; i++) {
+    AscendC::Mul(dst[i * MASK], src0[i * MASK], tmp, MASK, M, rp);
+  }
+}
+
 // SoftmaxFlashV2 config: WITHOUT_BRC -> the max/sum/exp outputs are (m,1), not
 // broadcast to (m,N). Mirrors the Ascend C reference's
 // SAS_SOFTMAX_FLASHV2_CFG_WITHOUT_BRC (sparse_attn_sharedkv_common.h:26).

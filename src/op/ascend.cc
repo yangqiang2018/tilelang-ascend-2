@@ -1170,6 +1170,15 @@ TIR_DEFINE_TL_BUILTIN(ascend_row_expand_sub)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
 
+// Non-PTO row-broadcast Mul (faithful Ascend C RowMuls = Brcb + Mul). A DISTINCT
+// op from the PTO ascend_row_expand_mul (TROWEXPANDMUL) so the PTO binding/codegen
+// and its callers (examples/HISA/*) stay byte-identical. Same arg layout as
+// div/sub: [0]=template name row_expand_mul<T,M,N>, [1..4]=dst/src0/src1col/tmp.
+TIR_DEFINE_TL_BUILTIN(ascend_row_expand_mul_nd)
+    .set_num_inputs(5)
+    .set_attr<TCallEffectKind>("TCallEffectKind",
+                               Integer(CallEffectKind::kOpaque));
+
 // Faithful Ascend C SoftmaxFlashV2 (variable-N online softmax; compacts the
 // window to a contiguous tile so the library runs in its win_align range).
 // Inputs: [0]=template name, [1]=dst(P), [2]=sum, [3]=max, [4]=expmax,

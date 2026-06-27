@@ -2197,6 +2197,17 @@ def row_expand_sub(dst, src0, src1, tmp):
     return _row_expand_binary("row_expand_sub", "tl.ascend_row_expand_sub", dst, src0, src1, tmp)
 
 
+def row_expand_mul_nd(dst, src0, src1, tmp):
+    """Row-broadcast multiply: dst[i, j] = src0[i, j] * src1[i]. The NON-PTO
+    counterpart of :func:`row_expand_mul` (which is PTO-only / TROWEXPANDMUL and
+    LOG(FATAL)s on the tilelang_ascend codegen path that SWA/CFA/SCFA use). Same
+    Brcb + Mul scheme as :func:`row_expand_div`; emits the distinct
+    ``tl.ascend_row_expand_mul_nd`` op so the PTO ``row_expand_mul`` and its
+    examples/HISA callers stay byte-identical. Faithful to Ascend C RowMuls (the
+    cfa/scfa flash-attention PV rescale). dst/src0 may alias (in-place)."""
+    return _row_expand_binary("row_expand_mul", "tl.ascend_row_expand_mul_nd", dst, src0, src1, tmp)
+
+
 def softmax_flash_v2(dst, out_sum, out_max, expmax, src, in_sum, in_max, tmp, compact, col_count, actual_col):
     """Faithful Ascend C SoftmaxFlashV2 (swa_block_vector.h SoftmaxFlashV2Compute):
     the variable-N online softmax over the SWA window.

@@ -183,6 +183,8 @@ TVM_DLL const Op &ascend_row_expand_div();
 
 TVM_DLL const Op &ascend_row_expand_sub();
 
+TVM_DLL const Op &ascend_row_expand_mul_nd();
+
 TVM_DLL const Op &ascend_softmax_flash_v2();
 
 TVM_DLL const Op &ascend_reinterpretcast();

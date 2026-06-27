@@ -621,7 +621,8 @@ void CodeGenTileLangAscend::VisitExpr_(const CallNode *op, std::ostream &os) {
   } else if (op->op.same_as(tl::ascend_gemm_v0_fixp())) {
     GemmFixpOpCodegen(op);
   } else if (op->op.same_as(tl::ascend_row_expand_div()) ||
-             op->op.same_as(tl::ascend_row_expand_sub())) {
+             op->op.same_as(tl::ascend_row_expand_sub()) ||
+             op->op.same_as(tl::ascend_row_expand_mul_nd())) {
     RowExpandCodegen(op);
   } else if (op->op.same_as(tl::ascend_softmax_flash_v2())) {
     SoftmaxFlashV2OpCodegen(op);
