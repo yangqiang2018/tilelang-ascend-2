@@ -628,6 +628,8 @@ void CodeGenTileLangAscend::VisitExpr_(const CallNode *op, std::ostream &os) {
     SoftmaxFlashV2OpCodegen(op);
   } else if (op->op.same_as(tl::ascend_copy_pa())) {
     CopyPACodegen(op);
+  } else if (op->op.same_as(tl::ascend_copy_gather())) {
+    CopyGatherCodegen(op);
   } else if (op->op.same_as(tl::ascend_printf())) {
     PrintfOpCodegen(op, "AscendC::PRINTF");
   } else if (op->op.same_as(tl::ascend_dump_tensor())) {
@@ -2231,6 +2233,29 @@ void CodeGenTileLangAscend::CopyPACodegen(const CallNode *op) {
                << "], " << var_idmap_[kv_var] << "[" << kv_offset << "], "
                << var_idmap_[bt_var] << "[" << bt_offset << "]";
   for (size_t i = 4; i < op->args.size(); ++i) {
+    this->stream << ", " << PrintExpr(op->args[i]);
+  }
+  this->stream << ");\n";
+}
+
+void CodeGenTileLangAscend::CopyGatherCodegen(const CallNode *op) {
+  // args: [0]=template op-name string, [1]=dst (UB tvm_access_ptr), [2]=src (GM
+  // tvm_access_ptr), [3..]=scalar params forwarded verbatim (blockCount,
+  // blockLenBytes, srcStrideBytes, dstStride). Two buffer ptrs + scalars; same
+  // shape as CopyPACodegen minus the block_table operand.
+  std::string op_name =
+      "tl::ascend::" + Downcast<StringImm>(op->args[0])->value;
+
+  auto dst_var = op->args[1].as<CallNode>()->args[1].as<VarNode>();
+  auto src_var = op->args[2].as<CallNode>()->args[1].as<VarNode>();
+
+  auto dst_offset = PrintExpr(op->args[1].as<CallNode>()->args[2]);
+  auto src_offset = PrintExpr(op->args[2].as<CallNode>()->args[2]);
+
+  this->PrintIndent();
+  this->stream << op_name << "(" << var_idmap_[dst_var] << "[" << dst_offset
+               << "], " << var_idmap_[src_var] << "[" << src_offset << "]";
+  for (size_t i = 3; i < op->args.size(); ++i) {
     this->stream << ", " << PrintExpr(op->args[i]);
   }
   this->stream << ");\n";
