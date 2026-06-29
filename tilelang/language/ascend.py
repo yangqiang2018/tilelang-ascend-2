@@ -574,6 +574,36 @@ def copy_pa(
     )
 
 
+def copy_gather(dst, src, block_count, block_len_bytes, src_stride_bytes, dst_stride=0):
+    """scfa V0 sparse-block gather: one DataCopyPad gathering ``block_count``
+    (1 or 2) GM blocks of ``src`` straight into the packed UB merge buffer
+    ``dst``. Faithful port of the reference op's ``CopyInKv`` -- the kernel
+    supplies every DataCopyExtParams field as a runtime value (the two
+    topk-selected GM blocks are non-adjacent, so ``src_stride_bytes`` is the
+    runtime byte gap between them, which an ordinary ``T.copy`` slice cannot
+    express). ``dst``/``src`` may carry runtime scalar offsets; those are folded
+    into the access pointer here (same as :func:`copy_pa`).
+
+    Returns:
+        tvm.tir.Call: A TIR intrinsic call to ``tl.ascend_copy_gather``.
+    """
+    dst = _legalize_arguments(dst)
+    src = _legalize_arguments(src)
+    dst_ptr = _retrieve_ptr(dst, "w")
+    src_ptr = _retrieve_ptr(src, "r")
+    return T.call_intrin(
+        "handle",
+        tir.op.Op.get("tl.ascend_copy_gather"),
+        f"copy_gm_to_ub_gather<{_dtype(src)}>",
+        dst_ptr,
+        src_ptr,
+        block_count,
+        block_len_bytes,
+        src_stride_bytes,
+        dst_stride,
+    )
+
+
 def printf(format_str: str, *args):
     """
     Prints formatted output.

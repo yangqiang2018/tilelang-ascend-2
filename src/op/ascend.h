@@ -209,6 +209,8 @@ TVM_DLL const Op &ascend_gemm_v1();
 
 TVM_DLL const Op &ascend_copy_pa();
 
+TVM_DLL const Op &ascend_copy_gather();
+
 TVM_DLL const Op &ascend_printf();
 
 TVM_DLL const Op &ascend_dump_tensor();

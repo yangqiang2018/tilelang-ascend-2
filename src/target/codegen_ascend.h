@@ -153,6 +153,7 @@ private:
   void RowExpandCodegen(const CallNode *op);
   void SoftmaxFlashV2OpCodegen(const CallNode *op);
   void CopyPACodegen(const CallNode *op);
+  void CopyGatherCodegen(const CallNode *op);
 
   void PrintfOpCodegen(const CallNode *op, const std::string &op_name);
 

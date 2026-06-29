@@ -1262,6 +1262,16 @@ TIR_DEFINE_TL_BUILTIN(ascend_copy_pa)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
 
+// scfa V0 sparse-block gather (faithful CopyInKv). Inputs: [0]=template name
+// "copy_gm_to_ub_gather<T>", [1]=dst UB ptr, [2]=src GM ptr, [3]=blockCount,
+// [4]=blockLenBytes, [5]=srcStrideBytes, [6]=dstStride. Emitted verbatim by
+// CopyGatherCodegen; no Lower (ptr offsets are resolved in the front-end, same
+// as ascend_copy_pa).
+TIR_DEFINE_TL_BUILTIN(ascend_copy_gather)
+    .set_num_inputs(-1)
+    .set_attr<TCallEffectKind>("TCallEffectKind",
+                               Integer(CallEffectKind::kOpaque));
+
 TIR_DEFINE_TL_BUILTIN(ascend_printf)
     .set_num_inputs(-1)
     .set_attr<TCallEffectKind>("TCallEffectKind",

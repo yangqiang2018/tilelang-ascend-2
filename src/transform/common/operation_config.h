@@ -73,6 +73,8 @@ GetOperationConfig() {
         "PIPE_V"}},
       {"gemm_v1", {{{0, "read"}, {1, "read"}, {2, "write"}}, "PIPE_M"}},
       {"copy_pa", {{{0, "write"}, {1, "read"}, {2, "read"}}, "PIPE_MTE2"}},
+      {"copy_gm_to_ub_gather",
+       {{{0, "write"}, {1, "read"}}, "PIPE_MTE2"}},
       {"AscendC::Add", {{{0, "write"}, {1, "read"}, {2, "read"}}, "PIPE_V"}},
       {"AscendC::Adds", {{{0, "write"}, {1, "read"}, {2, "read"}}, "PIPE_V"}},
       {"AscendC::Mul", {{{0, "write"}, {1, "read"}, {2, "read"}}, "PIPE_V"}},

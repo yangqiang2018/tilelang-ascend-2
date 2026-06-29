@@ -306,6 +306,26 @@ copy_ub_to_gm(GlobalTensor<T> dstTensor, LocalTensor<T> srcTensor,
   AscendC::DataCopyPad(dstTensor, srcTensor, dataCopyParams);
 }
 
+// Faithful Ascend C CopyInKv (scfa V0 sparse-block gather): one DataCopyPad that
+// gathers `blockCount` (1 or 2) GM blocks straight into a packed UB merge buffer.
+// Unlike copy_gm_to_ub (which derives blockCount from a slice's row extent and
+// srcStride from the source buffer's innermost shape), every DataCopyExtParams
+// field is a RUNTIME arg supplied by the kernel: blockLenBytes / srcStrideBytes
+// are the per-block byte length and the byte gap between the two topk-selected
+// (non-adjacent) GM blocks; dstStride==0 packs them in UB. No Duplicate pad --
+// byte-identical to the reference's `DataCopyPad(dst, src, intriParams, padParams)`
+// with a default-constructed padParams. Emitted by tl.ascend_copy_gather.
+template <typename T>
+CATLASS_DEVICE void
+copy_gm_to_ub_gather(LocalTensor<T> dstTensor, GlobalTensor<T> srcTensor,
+                     uint16_t blockCount, uint32_t blockLenBytes,
+                     uint32_t srcStrideBytes, uint32_t dstStride = 0) {
+  AscendC::DataCopyExtParams dataCopyParams(blockCount, blockLenBytes,
+                                            srcStrideBytes, dstStride, 0);
+  AscendC::DataCopyPadExtParams<T> padParams;
+  AscendC::DataCopyPad(dstTensor, srcTensor, dataCopyParams, padParams);
+}
+
 template <typename T, uint32_t srcN, uint32_t srcM = 1>
 CATLASS_DEVICE void
 atomic_add_ub_to_gm(GlobalTensor<T> dstTensor, LocalTensor<T> srcTensor,
