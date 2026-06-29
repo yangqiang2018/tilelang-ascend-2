@@ -217,8 +217,19 @@ Stmt AscendCopy::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
 
       ss << "copy_gm_to_ub<";
       ss << get_dtype(src) << ", ";
-      ss << dst_extents[dst->shape.size() - 1];
-      // ss << dst->shape[dst->shape.size() - 1];
+      // The column dim is a COMPILE-TIME template arg. A runtime inner-extent
+      // slice (dynamic width, e.g. a softmax's actual window tw_a < buffer width)
+      // would put a non-const expr in the template -> invalid C++ ("use of
+      // undeclared identifier"). Use the buffer's compile-time shape for the
+      // template; the runtime width is already carried by the maskShapeN function
+      // arg (validCol_dst). A const extent stays byte-identical (== shape for a
+      // full copy, or the const slice width), so every existing caller is
+      // unchanged -- only the previously-uncompilable runtime-slice case changes.
+      PrimExpr gm2ub_tmpl_n = dst_extents[dst->shape.size() - 1];
+      if (!gm2ub_tmpl_n->IsInstance<IntImmNode>()) {
+        gm2ub_tmpl_n = dst->shape[dst->shape.size() - 1];
+      }
+      ss << gm2ub_tmpl_n;
       if (dst->shape.size() > 1) {
         ss << ", " << compute_blocklen(dst, dst_extents);
       }
@@ -230,8 +241,14 @@ Stmt AscendCopy::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
 
       ss << "copy_ub_to_gm<";
       ss << get_dtype(dst) << ", ";
-      ss << src_extents[src->shape.size() - 1];
-      // ss << src->shape[src->shape.size() - 1];
+      // See copy_gm_to_ub above: a runtime inner-extent must use the buffer's
+      // compile-time shape for the template col dim (runtime width is carried by
+      // the maskShapeN function arg); const extents are byte-identical.
+      PrimExpr ub2gm_tmpl_n = src_extents[src->shape.size() - 1];
+      if (!ub2gm_tmpl_n->IsInstance<IntImmNode>()) {
+        ub2gm_tmpl_n = src->shape[src->shape.size() - 1];
+      }
+      ss << ub2gm_tmpl_n;
       if (src->shape.size() > 1) {
         ss << ", " << compute_blocklen(src, src_extents);
       }
