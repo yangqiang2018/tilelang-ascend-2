@@ -1326,40 +1326,6 @@ softmax_flash_v2(const LocalTensor<T> &dst, const LocalTensor<T> &sum,
                               static_cast<uint16_t>((N - col_count) / BLK), 0});
   AscendC::PipeBarrier<PIPE_V>();
 
-  // Mask each row's >=BLK alignment tail [actual_col, col_count) to -inf so the
-  // SoftmaxFlashV2 MAX (and SUM) exclude it. That tail is the QK gemm output over
-  // the UNINITIALISED kv-ring padding (stale L1); oriSrcK (= actual_col) does NOT
-  // exclude it from the MAX on this CANN version, so a large prior-op residue
-  // (e.g. cfa before scfa in a batch) poisons the row max -> huge m_i -> NaN LSE.
-  // -inf gives the same LSE/output as the reference's benign 0 tail (LSE is shift-
-  // invariant). Uses the SAME aligned-safe scheme as Sort() below (aligned bulk
-  // Duplicate + masked partial block); a plain Duplicate at the unaligned
-  // [actual_col] start faults the AICORE. Rows start at _m*col_count (BLK-aligned).
-  if (actual_col < col_count) {
-    const T negInf = -CUDART_INF_F;
-    uint32_t alignedActual = (actual_col / BLK) * BLK;
-    uint32_t inBlockOffset = actual_col - alignedActual;
-    for (uint32_t _m = 0; _m < M; ++_m) {
-      auto row = compact[_m * col_count];
-      if (inBlockOffset == 0) {
-        AscendC::Duplicate<T>(row[actual_col], negInf, col_count - actual_col);
-      } else {
-        uint32_t nextAligned = alignedActual + BLK;
-        if (nextAligned < col_count) {
-          AscendC::Duplicate<T>(row[nextAligned], negInf, col_count - nextAligned);
-        }
-        uint64_t mask0 = 0;
-        for (uint32_t i = inBlockOffset; i < BLK; ++i) {
-          mask0 |= (1ULL << i);
-        }
-        uint64_t masks[2] = {mask0, 0};
-        AscendC::Duplicate(row[alignedActual], negInf, masks, (uint8_t)1,
-                           (uint16_t)1, (uint8_t)0);
-      }
-    }
-    AscendC::PipeBarrier<PIPE_V>();
-  }
-
   SoftMaxShapeInfo srcShape{M, col_count, M, actual_col};
   SoftMaxTiling tiling = SoftMaxFlashV2TilingFunc(
       srcShape, sizeof(T), sizeof(T), tmp.GetSize(), true, false);
