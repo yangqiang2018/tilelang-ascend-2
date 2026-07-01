@@ -109,6 +109,21 @@ copy_pa(LocalTensor<T> dstTensor, GlobalTensor<T> srcTensor,
   uint64_t blockTableBaseOffset = (uint64_t)bIdx * maxblockNumPerBatch;
   uint32_t curS2Idx = s2Idx;
   uint32_t blockElementCnt = 32 / sizeof(T);
+  // Zero the row-padding [copyRowNum, copyRowNumAlign) of the Nz dest for a
+  // partial (non-16-aligned) window. The QK/PV gemm reads copyRowNumAlign rows;
+  // without this, the rows the Nd2Nz never wrote are stale L1, so the gemm output
+  // over them is GARBAGE -> it poisons the softmax row max (huge m_i -> NaN LSE
+  // when a prior op left large L1 residue, e.g. cfa before scfa in a batch). This
+  // makes the padded rows 0 (benign tail) -- = copy_gm_to_l1's InitConstValue and
+  // the Ascend C reference's zeroed KV padding (the reference does NOT -inf-mask;
+  // its tail is simply 0). Guarded so the aligned no-tail path is unchanged.
+  if (copyRowNum < copyRowNumAlign) {
+    AscendC::InitConstValue(
+        dstTensor,
+        {1, static_cast<uint16_t>(copyRowNumAlign * actHeadDim * sizeof(T) / 32),
+         0, 0});
+    AscendC::PipeBarrier<PIPE_MTE2>();
+  }
   while (copyFinishRowCnt < copyRowNum) {
     uint64_t blockIdOffset = curS2Idx / blockSize;
     uint64_t reaminRowCnt = curS2Idx % blockSize;
