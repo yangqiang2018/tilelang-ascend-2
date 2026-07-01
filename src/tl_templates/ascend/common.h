@@ -1326,23 +1326,6 @@ softmax_flash_v2(const LocalTensor<T> &dst, const LocalTensor<T> &sum,
                               static_cast<uint16_t>((N - col_count) / BLK), 0});
   AscendC::PipeBarrier<PIPE_V>();
 
-  // Mask the >=16 alignment tail [actual_col, col_count) of each row to -inf so
-  // SoftmaxFlashV2's MAX/SUM exclude it. That tail holds the QK gemm output over
-  // the UNINITIALISED kv-ring padding (cold/stale L1) -- if a prior op left a
-  // large value there, an unmasked tail poisons the row max (huge m_i -> NaN/inf
-  // LSE; reproduces only when a previous op left large residue, e.g. cfa before
-  // scfa in a batch). oriSrcK (= actual_col) does NOT exclude it from the MAX on
-  // this CANN version -- the reference masks it upstream (block_vector.h
-  // ElewiseCompute) before SoftmaxFlashV2. col_count - actual_col is < BLK.
-  if (actual_col < col_count) {
-    for (uint32_t _m = 0; _m < M; ++_m) {
-      AscendC::Duplicate(compact[_m * col_count + actual_col],
-                         static_cast<T>(-CUDART_INF_F),
-                         static_cast<int32_t>(col_count - actual_col));
-    }
-    AscendC::PipeBarrier<PIPE_V>();
-  }
-
   SoftMaxShapeInfo srcShape{M, col_count, M, actual_col};
   SoftMaxTiling tiling = SoftMaxFlashV2TilingFunc(
       srcShape, sizeof(T), sizeof(T), tmp.GetSize(), true, false);
