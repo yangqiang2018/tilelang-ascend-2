@@ -2160,7 +2160,13 @@ def _row_expand_binary(cpp_name, op_key, dst, src0, src1, tmp):
         dst_ptr, dst_shape = _handle_buffer_region_2d(dst, "w")
     else:
         dst_ptr = dst.access_ptr("w")
-        dst_shape = list(dst.shape[-2:])
+        # Match _handle_buffer_region_2d: flatten any leading dims into M so a
+        # Buffer dst behaves like a BufferRegion (a >2D Buffer would otherwise
+        # drop its leading dims, and a 1D one would IndexError on shape[-2:]).
+        if len(dst.shape) >= 2:
+            dst_shape = [math.prod(dst.shape[:-1]), dst.shape[-1]]
+        else:
+            dst_shape = [1, dst.shape[0]]
     if isinstance(src0, BufferRegion):
         src0_ptr, _ = _handle_buffer_region_2d(src0, "r")
     else:

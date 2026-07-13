@@ -1205,8 +1205,14 @@ CATLASS_DEVICE void row_expand_div(const LocalTensor<T> &dst,
   // are contiguous (row pitch == N). Both holds for the SWA caller (M=32, N<=512).
   static_assert(N / MASK <= M,
                 "row_expand_div assumes N/MASK <= M (row-repeat branch only)");
-  AscendC::Brcb(tmp, src1_col, (M + BLK - 1) / BLK,
-                AscendC::BrcbRepeatParams(1, BLK));
+  // Brcb writes ceil(M/8)*8 rows (8 per repeat), so M must be a multiple of 8
+  // or it overflows the [M, blk] tmp scratch.
+  static_assert(M % 8 == 0,
+                "row_expand_div requires M % 8 == 0 (Brcb writes 8-row blocks)");
+  // Brcb outputs 8 blocks (256B) per repeat regardless of dtype, so the repeat
+  // count is ceil(M/8) and dstRepStride is 8 blocks -- NOT BLK, which is only
+  // correct for fp32 (BLK=8); for fp16 (BLK=16) it would skip half the rows.
+  AscendC::Brcb(tmp, src1_col, (M + 7) / 8, AscendC::BrcbRepeatParams(1, 8));
   AscendC::PipeBarrier<PIPE_V>();
   AscendC::BinaryRepeatParams rp;
   rp.src0BlkStride = 1;
@@ -1234,8 +1240,14 @@ CATLASS_DEVICE void row_expand_sub(const LocalTensor<T> &dst,
                 "row_expand_sub requires N % (256/sizeof(T)) == 0");
   static_assert(N / MASK <= M,
                 "row_expand_sub assumes N/MASK <= M (row-repeat branch only)");
-  AscendC::Brcb(tmp, src1_col, (M + BLK - 1) / BLK,
-                AscendC::BrcbRepeatParams(1, BLK));
+  // Brcb writes ceil(M/8)*8 rows (8 per repeat), so M must be a multiple of 8
+  // or it overflows the [M, blk] tmp scratch.
+  static_assert(M % 8 == 0,
+                "row_expand_sub requires M % 8 == 0 (Brcb writes 8-row blocks)");
+  // Brcb outputs 8 blocks (256B) per repeat regardless of dtype, so the repeat
+  // count is ceil(M/8) and dstRepStride is 8 blocks -- NOT BLK, which is only
+  // correct for fp32 (BLK=8); for fp16 (BLK=16) it would skip half the rows.
+  AscendC::Brcb(tmp, src1_col, (M + 7) / 8, AscendC::BrcbRepeatParams(1, 8));
   AscendC::PipeBarrier<PIPE_V>();
   AscendC::BinaryRepeatParams rp;
   rp.src0BlkStride = 1;
@@ -1266,8 +1278,14 @@ CATLASS_DEVICE void row_expand_mul(const LocalTensor<T> &dst,
                 "row_expand_mul requires N % (256/sizeof(T)) == 0");
   static_assert(N / MASK <= M,
                 "row_expand_mul assumes N/MASK <= M (row-repeat branch only)");
-  AscendC::Brcb(tmp, src1_col, (M + BLK - 1) / BLK,
-                AscendC::BrcbRepeatParams(1, BLK));
+  // Brcb writes ceil(M/8)*8 rows (8 per repeat), so M must be a multiple of 8
+  // or it overflows the [M, blk] tmp scratch.
+  static_assert(M % 8 == 0,
+                "row_expand_mul requires M % 8 == 0 (Brcb writes 8-row blocks)");
+  // Brcb outputs 8 blocks (256B) per repeat regardless of dtype, so the repeat
+  // count is ceil(M/8) and dstRepStride is 8 blocks -- NOT BLK, which is only
+  // correct for fp32 (BLK=8); for fp16 (BLK=16) it would skip half the rows.
+  AscendC::Brcb(tmp, src1_col, (M + 7) / 8, AscendC::BrcbRepeatParams(1, 8));
   AscendC::PipeBarrier<PIPE_V>();
   AscendC::BinaryRepeatParams rp;
   rp.src0BlkStride = 1;
