@@ -1276,9 +1276,22 @@ def _wholereduce(
     srcrepstride: PrimExpr,
     reduce_order: str = None,
 ):
+    # Accept BufferRegion for a column-offset chunk of a wider strided buffer
+    # (e.g. src[:, 64k:64k+64]); the offset folds into access_ptr while the
+    # caller passes the physical row stride as srcrepstride, so a narrow online
+    # softmax can reduce each 64-column chunk in place without compaction.
+    if isinstance(dst, BufferRegion):
+        dst_ptr, _ = _handle_buffer_region(dst, "w")
+    else:
+        dst_ptr = dst.access_ptr("w")
+    if isinstance(src, BufferRegion):
+        src_ptr, _ = _handle_buffer_region(src, "r")
+    else:
+        src_ptr = src.access_ptr("r")
+
     args = [
-        dst.access_ptr("w"),
-        src.access_ptr("r"),
+        dst_ptr,
+        src_ptr,
         mask,
         repeattimes,
         dstrepstride,
