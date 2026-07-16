@@ -602,19 +602,15 @@ private:
       parts.push_back(part);
     }
 
-    if (parts.size() < 4) {
+    // Runtime-N reduce ("reduce_max_rt<dtype, M, dim>") drops the N template
+    // parameter -- the valid column count is a runtime argument -- so it has
+    // one fewer part than the normal "reduce_max<dtype, M, N, dim>" form. The
+    // vid split only touches M, so handle both layouts symmetrically.
+    bool is_rt = (param.find("_rt<") != std::string::npos);
+    size_t min_parts = is_rt ? 3u : 4u;
+    if (parts.size() < min_parts) {
       return IRMutatorWithAnalyzer::VisitExpr_(op);
     }
-
-    // parts[0]: dtype (e.g., "float")
-    // parts[1]: M (e.g., "64")
-    // parts[2]: N (e.g., "64")
-    // parts[3]: dim (e.g., "-1")
-
-    std::string dtype = parts[0];
-    std::string M_str = parts[1];
-    std::string N = parts[2];
-    std::string dim = parts[3];
 
     // Trim leading/trailing spaces
     auto trim = [](std::string s) -> std::string {
@@ -624,10 +620,12 @@ private:
       size_t end = s.find_last_not_of(" \t");
       return s.substr(start, end - start + 1);
     };
-    dtype = trim(dtype);
-    M_str = trim(M_str);
-    N = trim(N);
-    dim = trim(dim);
+
+    // Normal: parts = {dtype, M, N, dim}. Runtime-N: parts = {dtype, M, dim}.
+    std::string dtype = trim(parts[0]);
+    std::string M_str = trim(parts[1]);
+    std::string N = is_rt ? std::string() : trim(parts[2]);
+    std::string dim = is_rt ? trim(parts[2]) : trim(parts[3]);
 
     // Try to parse M as integer
     long long M;
@@ -644,9 +642,11 @@ private:
     if (new_M < 1)
       new_M = 1;
 
-    // Rebuild string: "reduce_sum<float, 32, 64, -1>"
-    std::string new_param = param.substr(0, start + 1) + dtype + ", " +
-                            std::to_string(new_M) + ", " + N + ", " + dim + ">";
+    // Rebuild string: "reduce_sum<float, 32, 64, -1>" (or the _rt 3-part form).
+    std::string inner =
+        is_rt ? (dtype + ", " + std::to_string(new_M) + ", " + dim)
+              : (dtype + ", " + std::to_string(new_M) + ", " + N + ", " + dim);
+    std::string new_param = param.substr(0, start + 1) + inner + ">";
 
     // Build new Call
     Array<PrimExpr> new_args = ascend_reduce->args;

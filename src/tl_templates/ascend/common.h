@@ -567,6 +567,40 @@ reduce_sum(LocalTensor<T> const &dstTensor, LocalTensor<T> const &srcTensor,
   }
 }
 
+// Runtime-N reduce (014-family): N is a runtime arg instead of a template
+// constant, so a caller can reduce only the first N (valid) columns of each row
+// of a wider buffer -- the AscendC shape array is runtime and the buffer's row
+// stride is carried by srcTensor, exactly like the compile-time real_shape /
+// slice path (examples/reduce/example_row_reduce_max_slice_buffer.py) but with
+// N resolved at runtime. clear=true only (the online-softmax path).
+template <typename T, uint32_t M, int32_t dim>
+CATLASS_DEVICE void
+reduce_sum_rt(LocalTensor<T> const &dstTensor, LocalTensor<T> const &srcTensor,
+              LocalTensor<uint8_t> const &sharedTmpBuffer, uint32_t N) {
+  uint32_t shape[] = {M, N};
+  if constexpr (dim == -1) {
+    AscendC::ReduceSum<T, AscendC::Pattern::Reduce::AR>(
+        dstTensor, srcTensor, sharedTmpBuffer, shape, true);
+  } else {
+    AscendC::ReduceSum<T, AscendC::Pattern::Reduce::RA>(
+        dstTensor, srcTensor, sharedTmpBuffer, shape, true);
+  }
+}
+
+template <typename T, uint32_t M, int32_t dim>
+CATLASS_DEVICE void
+reduce_max_rt(LocalTensor<T> const &dstTensor, LocalTensor<T> const &srcTensor,
+              LocalTensor<uint8_t> const &sharedTmpBuffer, uint32_t N) {
+  uint32_t shape[] = {M, N};
+  if constexpr (dim == -1) {
+    AscendC::ReduceMax<T, AscendC::Pattern::Reduce::AR>(
+        dstTensor, srcTensor, sharedTmpBuffer, shape, true);
+  } else {
+    AscendC::ReduceMax<T, AscendC::Pattern::Reduce::RA>(
+        dstTensor, srcTensor, sharedTmpBuffer, shape, true);
+  }
+}
+
 template <typename T>
 CATLASS_DEVICE T reduce_scalar_max_safe(T lhsValue, T rhsValue) {
   // Bisheng/AICore does not allow scalar half/bfloat16 comparisons inside

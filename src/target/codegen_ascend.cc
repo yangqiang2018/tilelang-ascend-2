@@ -1932,6 +1932,23 @@ void CodeGenTileLangAscend::ReduceOpCodegen(const CallNode *op) {
   std::string op_name =
       "tl::ascend::" + Downcast<StringImm>(op->args[0])->value;
 
+  // Runtime-N reduce (014-family): the template only carries <T, M, dim>; the
+  // valid column count N is a runtime argument. After the tmp-buffer pass the
+  // argument layout is [0]=template, [1]=dst, [2]=src, [3]=tmp, [4]=clear,
+  // [5]=N, so dst/src/tmp are the first three access-ptr args and N is last.
+  // clear is always true on this path (reduce_sum_rt / reduce_max_rt in
+  // common.h hard-code it), so it is not forwarded.
+  if (op_name.find("_rt<") != std::string::npos) {
+    std::string dst = PrintBufferOffset(op->args[1].as<CallNode>());
+    std::string src = PrintBufferOffset(op->args[2].as<CallNode>());
+    std::string tmp = PrintBufferOffset(op->args[3].as<CallNode>());
+    std::string n = this->PrintExpr(op->args[op->args.size() - 1]);
+    this->PrintIndent();
+    this->stream << op_name << "(" << dst << ", " << src << ", " << tmp << ", "
+                 << n << ");\n";
+    return;
+  }
+
   bool is_reduce_sum = (op_name.find("reduce_sum") != std::string::npos);
   int buffer_arg_end = static_cast<int>(op->args.size());
   bool clear = true;

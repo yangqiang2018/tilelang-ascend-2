@@ -324,6 +324,32 @@ def reduce(
         N = buffer_extent[2]
     else:
         raise ValueError(f"Unsupported buffer rank {len(buffer_extent)} for Ascend fast-path reduce: {buffer_extent}")
+
+    # Runtime-N (valid column count) reduce: when the logical column count is a
+    # runtime expression rather than a compile-time constant, the row count M
+    # must still be a compile-time template constant, and N is lowered to a
+    # runtime argument of the ``*_rt`` intrinsic instead of a template
+    # parameter (see reduce_sum_rt / reduce_max_rt in common.h). This lets a
+    # caller reduce only the first N valid columns of a wider padded buffer
+    # without white-computing the padding.
+    n_const = _try_get_const_int(N)
+    if n_const is None:
+        m_const = _try_get_const_int(M)
+        if m_const is None:
+            raise ValueError(
+                f"Ascend runtime-N reduce requires a compile-time M (row count), "
+                f"but got a runtime M={M} for buffer shape {_shape_to_str(list(buffer_extent))}"
+            )
+        return tir.call_intrin(
+            "handle",
+            tir.op.Op.get("tl.ascend_reduce"),
+            f"{reduce_type}_rt<{dtype}, {m_const}, {dim}>",
+            out_ptr,
+            buffer_ptr,
+            tir.const(clear, "bool"),
+            N,
+        )
+
     shape = f"{M}, {N}"
 
     return tir.call_intrin(
