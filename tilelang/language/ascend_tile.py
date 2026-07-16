@@ -1279,7 +1279,11 @@ def _wholereduce(
     # Accept BufferRegion for a column-offset chunk of a wider strided buffer
     # (e.g. src[:, 64k:64k+64]); the offset folds into access_ptr while the
     # caller passes the physical row stride as srcrepstride, so a narrow online
-    # softmax can reduce each 64-column chunk in place without compaction.
+    # softmax can reduce each 64-column chunk in place without compaction. A
+    # sliced index like src[:, a:b] arrives as a BufferLoad -- normalize it to a
+    # BufferRegion first (same as the other tile ops).
+    dst = _normalize_buffer_arg(dst)
+    src = _normalize_buffer_arg(src)
     if isinstance(dst, BufferRegion):
         dst_ptr, _ = _handle_buffer_region(dst, "w")
     else:
