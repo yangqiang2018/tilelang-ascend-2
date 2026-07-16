@@ -310,6 +310,7 @@ GetOperationConfig() {
        {{{1, "write"}, {2, "read"}, {3, "read"}}, "PIPE_V"}},
       {"tl.ascend_row_expand_div_experiment",
        {{{1, "write"}, {2, "read"}, {3, "read"}}, "PIPE_V"}},
+      {"tl.ascend_exp_experiment", {{{1, "write"}, {2, "read"}}, "PIPE_V"}},
   };
 
   return operation_config_;

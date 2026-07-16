@@ -274,6 +274,8 @@ TVM_DLL const Op &ascend_row_expand_mul_experiment();
 TVM_DLL const Op &ascend_row_expand_sub_experiment();
 
 TVM_DLL const Op &ascend_row_expand_div_experiment();
+
+TVM_DLL const Op &ascend_exp_experiment();
 } // namespace tl
 } // namespace tvm
 
