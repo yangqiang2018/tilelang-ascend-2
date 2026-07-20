@@ -459,7 +459,12 @@ void CodeGenTileLangAscend::VisitExpr_(const BufferLoadNode *op,
   if (scope == "local.var") {
     os << var_name;
   } else {
-    os << var_name << ".GetValue(" << PrintExpr(op->indices.back()) << ")";
+    // A scalar access needs the offset flattened across every dimension.
+    // indices.back() alone silently drops the leading ones, so a read of
+    // table[b, i] on a [B, N] buffer would always hit row 0. OffsetOf is
+    // identity for a 1-D buffer, so 1-D accesses are unchanged.
+    os << var_name << ".GetValue("
+       << PrintExpr(op->buffer.OffsetOf(op->indices).back()) << ")";
   }
 }
 
@@ -470,8 +475,10 @@ void CodeGenTileLangAscend::VisitStmt_(const BufferStoreNode *op) {
   if (scope == "local.var") {
     this->stream << var_name << " = " << PrintExpr(op->value) << ";\n";
   } else {
-    this->stream << var_name << ".SetValue(" << PrintExpr(op->indices.back())
-                 << ", " << PrintExpr(op->value) << ");\n";
+    // Same flattening as the scalar load above.
+    this->stream << var_name << ".SetValue("
+                 << PrintExpr(op->buffer.OffsetOf(op->indices).back()) << ", "
+                 << PrintExpr(op->value) << ");\n";
   }
 }
 
