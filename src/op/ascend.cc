@@ -71,6 +71,13 @@ AscendCopy::AscendCopy(Array<PrimExpr> args, BufferMap vmap) : args_(args) {
   } else {
     realK = Integer(0);
   }
+  // optional L1->L0B runtime N (default 0 = use dst L0 buffer dim,
+  // byte-identical for every existing l1->l0 copy).
+  if (args.size() >= 8) {
+    realN = args[7];
+  } else {
+    realN = Integer(0);
+  }
   std::tie(this->src, this->dst) = std::tie(bf[0], bf[1]);
   std::tie(this->src_range, this->dst_range) = std::tie(rgs[0], rgs[1]);
   std::tie(this->src_extents, this->dst_extents) = std::tie(ets[0], ets[1]);
@@ -483,6 +490,12 @@ Stmt AscendCopy::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
       } else if (dst.scope() == "wmma.matrix_b") {
         dm = realK;
       }
+    }
+    // realN overrides matrix_b's N extent ([K,N] -> dn), the axis realK does
+    // not cover. matrix_a is [M,K] and has no N, so realN does not apply.
+    const auto *rn_imm = realN.as<IntImmNode>();
+    if (!(rn_imm && rn_imm->value == 0) && dst.scope() == "wmma.matrix_b") {
+      dn = realN;
     }
     new_args.push_back(dm);
     new_args.push_back(dn);

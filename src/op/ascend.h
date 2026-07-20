@@ -44,6 +44,12 @@ private:
   // (copy_l1_to_l0a dstN / copy_l1_to_l0b dstM) so it matches the mma's k_actual
   // -- otherwise a full-width L0 load + a k=winm mma read mismatched fractals.
   PrimExpr realK;
+  // L1->L0B runtime output width (default 0 = use the dst L0 buffer dim).
+  // Parsed from optional args[7]. The other axis of the same problem realK
+  // solves: L0B's nZ fractal derives its K-block stride from the column count,
+  // so a full-width load followed by an n=n_actual mma addresses the wrong
+  // K-blocks. The L1->L0 counterpart of the mma's n_actual.
+  PrimExpr realN;
 };
 
 class AscendAtomicAdd : public Operator {

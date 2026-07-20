@@ -201,6 +201,7 @@ def npu_copy_v2(
     pad_value: float | int | tir.PrimExpr | None = None,
     unit_flag: int | None = None,
     real_k: int | tir.PrimExpr | None = None,
+    real_n: int | tir.PrimExpr | None = None,
 ):
     """Copy data between memory regions.
 
@@ -227,6 +228,14 @@ def npu_copy_v2(
             ``T.mma(k_actual=real_k)`` -- otherwise the full-width load + a shorter
             mma K read mismatched fractals (wrong M-block addressing). The L1->L0
             counterpart of the mma's ``k_actual``.
+        real_n (Optional[int | PrimExpr]): L1->L0B runtime output width. Defaults
+            to ``None`` -> the fractal's N extent comes from the dst L0 buffer dim
+            (byte-identical for every existing copy). The other axis of the same
+            problem ``real_k`` solves: L0B's nZ fractal derives its K-block stride
+            from the column count, so a full-width load followed by a shorter
+            ``T.mma(n_actual=...)`` addresses the wrong K-blocks. Set it (e.g.
+            ``real_n=win_align``) to match that mma. Applies to ``matrix_b`` only
+            -- ``matrix_a`` is ``[M, K]`` and has no N.
 
     Raises:
         TypeError: If copy extents cannot be deduced from arguments
@@ -300,11 +309,17 @@ def npu_copy_v2(
         pad_value_expr = tir.IntImm("int32", int(pad_value))
 
     copy_args = [src, dst, enable_relu, transpose, pad_value_expr]
-    # unit_flag at position [5], real_k at [6]. When real_k is given but unit_flag
-    # is not, emit unit_flag=0 so real_k keeps its fixed position. Both default
-    # absent -> every existing copy is byte-identical.
-    if unit_flag is not None or real_k is not None:
+
+    # unit_flag at position [5], real_k at [6], real_n at [7]. Each is emitted as
+    # 0 when a later one is given without it, so the positions stay fixed. All
+    # three absent -> every existing copy is byte-identical.
+    def _as_expr(v):
+        return v if isinstance(v, tir.PrimExpr) else tir.IntImm("int32", int(v))
+
+    if unit_flag is not None or real_k is not None or real_n is not None:
         copy_args.append(tir.IntImm("int32", int(unit_flag) if unit_flag is not None else 0))
-        if real_k is not None:
-            copy_args.append(real_k if isinstance(real_k, tir.PrimExpr) else tir.IntImm("int32", int(real_k)))
+        if real_k is not None or real_n is not None:
+            copy_args.append(_as_expr(real_k) if real_k is not None else tir.IntImm("int32", 0))
+            if real_n is not None:
+                copy_args.append(_as_expr(real_n))
     return tir.call_intrin("handle", tir.op.Op.get("tl.ascend_copy"), *copy_args)
