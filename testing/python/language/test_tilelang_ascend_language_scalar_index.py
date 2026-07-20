@@ -9,7 +9,7 @@ The kernel varies both indices on a [B, N] buffer, so a dropped leading index
 shows up as rows 1.. holding row 0's values. It exercises the scalar load and
 the scalar store together.
 
-Covers the "ascendc" target: the codegen this pins is the non-PTO one.
+Both codegens carried the same defect, so both targets are covered.
 """
 
 import pytest
@@ -45,13 +45,14 @@ def scalar_index_2d(B, N, dtype="int32"):
     return main
 
 
+@pytest.mark.parametrize("target", ["ascendc", "pto"])
 @pytest.mark.parametrize("B,N", [(4, 8), (3, 16), (2, 32)])
-def test_scalar_index_2d(B, N):
+def test_scalar_index_2d(B, N, target):
     tilelang.cache.clear_cache()
     func = tilelang.compile(
         scalar_index_2d(B, N),
         out_idx=[1],
-        target="ascendc",
+        target=target,
         pass_configs=pass_configs,
     )
     table = torch.arange(B * N, dtype=torch.int32).reshape(B, N)

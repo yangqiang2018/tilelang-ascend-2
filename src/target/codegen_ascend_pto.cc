@@ -643,13 +643,16 @@ void CodeGenTileLangAscendPto::VisitExpr_(const BufferLoadNode *op,
                                           std::ostream &os) {
   auto var_name = var_idmap_[op->buffer->data.get()];
   std::string scope = op->buffer.scope();
+  // A scalar access needs the offset flattened across every dimension;
+  // indices.back() alone would make every row alias row 0. Identity for a
+  // 1-D buffer, so 1-D accesses are unchanged.
+  std::string offset = PrintExpr(op->buffer.OffsetOf(op->indices).back());
   if (scope == "" || scope == "global") {
-    os << "*(" << var_name << "_handle + " << PrintExpr(op->indices.back())
-       << ")";
+    os << "*(" << var_name << "_handle + " << offset << ")";
   } else if (scope == "local.var") {
     os << var_name;
   } else {
-    os << var_name << ".GetValue(" << PrintExpr(op->indices.back()) << ")";
+    os << var_name << ".GetValue(" << offset << ")";
   }
 }
 
@@ -657,16 +660,17 @@ void CodeGenTileLangAscendPto::VisitStmt_(const BufferStoreNode *op) {
   auto var_name = var_idmap_[op->buffer->data.get()];
   this->PrintIndent();
   std::string scope = op->buffer.scope();
+  // Same flattening as the scalar load above.
+  std::string offset = PrintExpr(op->buffer.OffsetOf(op->indices).back());
 
   if (scope == "" || scope == "global") {
-    this->stream << "*(" << var_name << "_handle + "
-                 << PrintExpr(op->indices.back())
+    this->stream << "*(" << var_name << "_handle + " << offset
                  << ") = " << PrintExpr(op->value) << ";\n";
   } else if (scope == "local.var") {
     this->stream << var_name << " = " << PrintExpr(op->value) << ";\n";
   } else {
-    this->stream << var_name << ".SetValue(" << PrintExpr(op->indices.back())
-                 << ", " << PrintExpr(op->value) << ");\n";
+    this->stream << var_name << ".SetValue(" << offset << ", "
+                 << PrintExpr(op->value) << ");\n";
   }
 }
 
