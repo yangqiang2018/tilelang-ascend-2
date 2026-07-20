@@ -402,6 +402,12 @@ Stmt AscendCopy::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
   };
 
   PrimExpr validRow_src, validCol_src, validRow_dst, validCol_dst;
+  // 1 when the dst region covers only part of its buffer's rows -- a non-zero
+  // row offset, or a row extent shorter than the buffer. Such a copy shares
+  // the buffer with the other copies that fill the remaining rows, so it must
+  // not zero-fill the whole buffer the way a partial copy into a buffer it
+  // owns does (see copy_gm_to_l1).
+  PrimExpr dstIsSlice = Integer(0);
 
   // src: compute validRow and validCol using active dimension indices
   std::vector<int> src_active = find_active_dim_indices(src_extents);
@@ -430,6 +436,12 @@ Stmt AscendCopy::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
   if (dst_active.size() >= 2) {
     int row_idx = dst_active[dst_active.size() - 2];
     int col_idx = dst_active.back();
+    // A runtime row extent never proves equal to the buffer shape, which is
+    // exactly the segmented-load case this needs to catch.
+    bool owns_whole_rows = is_zero(dst_range[row_idx]->min) &&
+                           analyzer->CanProveEqual(dst_range[row_idx]->extent,
+                                                   dst->shape[row_idx]);
+    dstIsSlice = Integer(owns_whole_rows ? 0 : 1);
     validRow_dst =
         compute_valid_extent(dst_range[row_idx]->min,
                              dst_range[row_idx]->extent, dst->shape[row_idx]);
@@ -493,6 +505,7 @@ Stmt AscendCopy::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
     new_args.push_back(compute_strideN(src, src_extents));
     new_args.push_back(validRow_src);
     new_args.push_back(validCol_src);
+    new_args.push_back(dstIsSlice);
     new_args.push_back(dst->shape[dst->shape.size() - 2]);
     new_args.push_back(dst->shape[dst->shape.size() - 1]);
   }

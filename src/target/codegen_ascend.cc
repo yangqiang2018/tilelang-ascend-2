@@ -2630,9 +2630,13 @@ void CodeGenTileLangAscend::CopyCodegen(const CallNode *op) {
 
   static const std::unordered_map<std::string, int> kCopyOpExtraArgs = {
       // copy_l0c_to_gm: 4 extra = realDstN, realTailM, realTailN, unitFlag.
-      // unitFlag is always emitted (AscendCopy::Lower pushes 0 when unset), so a
+      // unitFlag is always emitted (AscendCopy::Lower pushes 0 when unset), so
+      // a
       // standalone fixpipe stays byte-identical (the template default was 0).
-      {"copy_l0c_to_gm", 4},      {"copy_gm_to_l1", 3},
+      // copy_gm_to_l1: 4 extra = realSrcN, realTailM, realTailN, dstIsSlice.
+      // dstIsSlice is always emitted (0 for a whole-buffer dst), so every
+      // existing caller stays byte-identical (the template default was 0).
+      {"copy_l0c_to_gm", 4},      {"copy_gm_to_l1", 4},
       {"copy_l1_to_l0a", 2},      {"copy_l1_to_l0b", 2},
       {"copy_gm_to_ub", 4},       {"copy_ub_to_gm", 3},
       {"atomic_add_ub_to_gm", 3}, {"atomic_add_l0c_to_gm", 3},

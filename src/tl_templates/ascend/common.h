@@ -60,13 +60,22 @@ CATLASS_DEVICE void disable_dma_atomic_compat() {
 }
 
 template <typename T, uint32_t dstM, uint32_t dstN>
-CATLASS_DEVICE void copy_gm_to_l1(LocalTensor<T> dstTensor,
-                                  GlobalTensor<T> srcTensor,
-                                  uint32_t realSrcN = 1, uint32_t realTailM = 0,
-                                  uint32_t realTailN = 0) {
+CATLASS_DEVICE void
+copy_gm_to_l1(LocalTensor<T> dstTensor, GlobalTensor<T> srcTensor,
+              uint32_t realSrcN = 1, uint32_t realTailM = 0,
+              uint32_t realTailN = 0, uint32_t dstIsSlice = 0) {
   uint32_t tailM = realTailM == 0 ? dstM : realTailM;
   uint32_t tailN = realTailN == 0 ? dstN : realTailN;
-  if (tailM != dstM || tailN != dstN) {
+  // A partial copy zero-fills the tile first, so the rows and columns it does
+  // not cover read as 0. That is only correct when this copy owns the whole
+  // buffer. dstIsSlice marks a copy that fills only part of the rows, with
+  // other copies filling the rest -- a segmented load, e.g. a paged KV window
+  // assembled one page at a time. Zero-filling then destroys the rows a
+  // sibling copy wrote, and since dstTensor is already advanced by the row
+  // offset it also runs past the end of the buffer. The assembled region's
+  // own tail is left to the caller, exactly as a hand-written paged load
+  // leaves it. Default 0 keeps every existing whole-buffer caller identical.
+  if ((tailM != dstM || tailN != dstN) && dstIsSlice == 0) {
     AscendC::InitConstValue(
         dstTensor,
         {1, static_cast<uint16_t>(dstM * dstN * sizeof(T) / 32), 0, 0});
